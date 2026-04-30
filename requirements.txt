@@ -1,0 +1,10 @@
+torch>=2.2,<2.4
+torchvision>=0.17,<0.19
+timm==0.9.16
+numpy
+pandas
+scikit-learn
+pillow
+tqdm
+matplotlib
+kagglehub==0.2.5

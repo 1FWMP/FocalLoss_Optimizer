@@ -1,0 +1,32 @@
+name: focal-ham10000
+# conda 로는 파이썬/pip 만 만들고, PyTorch 와 나머지는 pip 로 설치한다.
+# 이유:
+#   - conda 채널의 pytorch-cuda 패키지가 매우 크고(>1GB), 한국에서 다운로드가
+#     끊기는 IncompleteRead 가 자주 발생.
+#   - PyTorch 공식 pip wheel(https://download.pytorch.org/whl/...) 이 더 가볍고
+#     재시도/캐시도 잘 동작한다.
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      # ---- PyTorch (CUDA 12.1 wheel) ----
+      # CPU-only 환경이면 아래 두 줄 대신
+      #   - torch==2.2.2
+      #   - torchvision==0.17.2
+      # 만 남기면 된다 (인덱스 URL 제거).
+      - --index-url https://download.pytorch.org/whl/cu121
+      - torch==2.2.2
+      - torchvision==0.17.2
+      # 이후 패키지들은 PyPI 에서 받아야 하므로 extra-index 로 PyPI 를 추가한다.
+      - --extra-index-url https://pypi.org/simple
+      - timm==0.9.16
+      - numpy
+      - pandas
+      - scikit-learn
+      - pillow
+      - tqdm
+      - matplotlib
+      - kagglehub==0.2.5
