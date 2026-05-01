@@ -7,4 +7,4 @@ scikit-learn
 pillow
 tqdm
 matplotlib
-kagglehub==0.2.5
+kagglehub>=0.3.0

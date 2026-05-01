@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import kagglehub; print\\(kagglehub.__version__\\); print\\(hasattr\\(kagglehub, 'dataset_download'\\)\\)\")",
+      "Bash(conda env *)"
+    ]
+  }
+}
