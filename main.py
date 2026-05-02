@@ -42,7 +42,7 @@ from dataset import (
     load_metadata,
 )
 from losses import build_loss
-from model import build_efficientnet_b3
+from model import SUPPORTED_BACKBONES, build_model
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +57,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--loss_type", type=str, default="ce",
                         choices=["ce", "cb_focal"],
                         help="사용할 손실 함수")
+    parser.add_argument("--backbone", type=str, default="efficientnet_b3",
+                        choices=list(SUPPORTED_BACKBONES),
+                        help="사용할 backbone 모델")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -71,7 +74,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--output_dir", type=str, default="./outputs")
-    parser.add_argument("--save_name", type=str, default="best_model.pth")
+    parser.add_argument("--save_name", type=str, default=None,
+                        help="저장할 모델 파일명 (미지정 시 best_model_{backbone}_{loss_type}.pth)")
     parser.add_argument("--no_pretrained", action="store_true",
                         help="ImageNet 사전학습 가중치 미사용 (디버깅용)")
     return parser.parse_args()
@@ -242,6 +246,7 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] device                : {device}")
+    print(f"[INFO] backbone              : {args.backbone}")
     print(f"[INFO] loss_type             : {args.loss_type}")
     print(f"[INFO] epochs / bs / lr      : {args.epochs} / {args.batch_size} / {args.lr}")
     if args.loss_type == "cb_focal":
@@ -288,8 +293,8 @@ def main() -> None:
     )
 
     # ---- 5.3 Model / Loss / Optimizer ----------------------------------------
-    model = build_efficientnet_b3(
-        num_classes=NUM_CLASSES, pretrained=not args.no_pretrained
+    model = build_model(
+        backbone=args.backbone, num_classes=NUM_CLASSES, pretrained=not args.no_pretrained
     ).to(device)
 
     criterion = build_loss(
@@ -309,7 +314,8 @@ def main() -> None:
 
     # ---- 5.4 Training loop ----------------------------------------------------
     best_f1 = -1.0
-    best_path = output_dir / args.save_name
+    save_name = args.save_name or f"best_model_{args.backbone}_{args.loss_type}.pth"
+    best_path = output_dir / save_name
     history = []
 
     for epoch in range(1, args.epochs + 1):
@@ -355,7 +361,7 @@ def main() -> None:
             print(f"  >> Best updated! Macro F1 = {best_f1:.4f}  saved -> {best_path}")
 
     # ---- 5.5 학습 로그 저장 ---------------------------------------------------
-    log_path = output_dir / f"history_{args.loss_type}.json"
+    log_path = output_dir / f"history_{args.backbone}_{args.loss_type}.json"
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump(
             {"best_macro_f1": best_f1, "history": history, "args": vars(args)},

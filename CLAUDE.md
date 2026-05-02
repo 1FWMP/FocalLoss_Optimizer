@@ -17,20 +17,38 @@ EfficientNet-B3 (timm) 위에서 비교한다.
 - 평가 지표: **Macro F1** (클래스 불균형이 심해 accuracy 대신 사용)
 - 데이터 누수 방지: 동일 `lesion_id` 가 train/val 양쪽에 들어가지 않도록 lesion 단위 stratified split
 
+### 실험 구조 (2단계)
+
+| Phase | 목적 | 실험 내용 |
+|---|---|---|
+| 1 | Backbone 비교 | ResNet-50 / DenseNet-121 / MobileNetV3-Large / EfficientNet-B3 × CE |
+| 2 | 메인 실험 | EfficientNet-B3 × CE vs CB-Focal |
+
+- Phase 1 은 CE 고정으로 backbone 변수만 분리해 비교
+- Phase 2 에서 loss function 트레이드오프 분석 (CB-Focal 하이퍼파라미터 포함)
+
 ## 2. 디렉토리 구조
 
 ```
 FocalLoss_Optimizer/
-├── main.py            # 학습/검증 엔트리포인트 (parse_args → train loop)
-├── dataset.py         # HAM10000Dataset, discover_image_roots, load_metadata
-├── losses.py          # CBFocalLoss + build_loss factory
-├── model.py           # EfficientNet-B3 (timm) 빌더
-├── download_data.py   # Kaggle 미러에서 HAM10000 받기
-├── environment.yml    # conda 환경 (파이썬만 conda, 나머지는 pip)
-├── requirements.txt   # pip 의존성
-├── README.md          # 사용자/팀원용 문서
-├── CLAUDE.md          # ← 이 파일 (Claude Code 가이드)
-└── outputs/           # 학습 결과 (best_model.pth, history_<loss>.json)
+├── main.py               # 학습/검증 엔트리포인트 (parse_args → train loop)
+├── dataset.py            # HAM10000Dataset, discover_image_roots, load_metadata
+├── losses.py             # CBFocalLoss + build_loss factory
+├── model.py              # SUPPORTED_BACKBONES + build_model factory (timm)
+├── download_data.py      # Kaggle 미러에서 HAM10000 받기
+├── run_experiments.sh    # 5번 실험 순차 실행 + 결과 분석 호출
+├── analyze_results.py    # summary.csv + 시각화 이미지 생성
+├── environment.yml       # conda 환경 (파이썬만 conda, 나머지는 pip)
+├── requirements.txt      # pip 의존성
+├── README.md             # 사용자/팀원용 문서
+├── CLAUDE.md             # ← 이 파일 (Claude Code 가이드)
+└── outputs/              # 학습 결과
+    ├── best_model_{backbone}_{loss_type}.pth
+    ├── history_{backbone}_{loss_type}.json
+    ├── summary.csv
+    └── plots/
+        ├── f1_comparison.png
+        └── learning_curves.png
 ```
 
 ## 3. 자주 쓰는 명령어
@@ -43,13 +61,36 @@ conda activate focal-ham10000
 # 데이터 다운로드 (Kaggle 인증 필요할 수 있음)
 python download_data.py --data_dir ./data
 
-# Cross-Entropy 베이스라인
-python main.py --data_dir ./data --loss_type ce --epochs 30 --batch_size 32 --lr 1e-4
+# 전체 실험 한번에 실행 (5번 순차 + 결과 분석)
+bash run_experiments.sh
+# 데이터 경로가 다를 경우:
+DATA_DIR=/path/to/data bash run_experiments.sh
 
-# Class-Balanced Focal Loss
-python main.py --data_dir ./data --loss_type cb_focal \
+# 개별 실행 예시
+# Cross-Entropy 베이스라인 (EfficientNet-B3)
+python main.py --data_dir ./data --backbone efficientnet_b3 --loss_type ce --epochs 30 --batch_size 32 --lr 1e-4
+
+# Class-Balanced Focal Loss (EfficientNet-B3)
+python main.py --data_dir ./data --backbone efficientnet_b3 --loss_type cb_focal \
     --beta 0.999 --gamma 2.0 --epochs 30 --batch_size 32 --lr 1e-4
+
+# Backbone 비교 예시 (ResNet-50)
+python main.py --data_dir ./data --backbone resnet50 --loss_type ce --epochs 30 --batch_size 32 --lr 1e-4
+
+# 결과 분석만 별도 실행
+python analyze_results.py --output_dir ./outputs
 ```
+
+### 지원 backbone (`model.py:SUPPORTED_BACKBONES`)
+
+| 키 | timm 모델명 |
+|---|---|
+| `efficientnet_b3` | efficientnet_b3 |
+| `resnet50` | resnet50 |
+| `densenet121` | densenet121 |
+| `mobilenetv3_large_100` | mobilenetv3_large_100 |
+
+모두 ImageNet-1k pretrained 가중치 사용.
 
 ## 4. 코드 컨벤션 / 작업 시 주의
 
@@ -57,7 +98,7 @@ python main.py --data_dir ./data --loss_type cb_focal \
 - **CB-Focal 가중치 정규화**: `losses.py:CBFocalLoss` 에서 `weights / weights.sum() * num_classes` (논문 official impl 컨벤션). 임의로 빼지 말 것.
 - **수치 안정성**: focal loss 계산은 `log_softmax + clamp(eps=1e-7)` 조합 유지.
 - **재현성**: `main.py:set_seed` 에서 `cudnn.deterministic=True, benchmark=False`. 속도 우선이 필요하면 별도 플래그로 분리할 것 (현재 코드를 직접 바꾸지 말 것).
-- **Best 모델 기준**: Macro F1 (accuracy 아님). `outputs/best_model.pth`.
+- **Best 모델 기준**: Macro F1 (accuracy 아님). `outputs/best_model_{backbone}_{loss_type}.pth`.
 - **이미지 루트 탐색**: `dataset.py:discover_image_roots` 가 `images/`, `HAM10000_images_part_{1,2}/`, `ham10000_images/`, `data_dir` 자체를 모두 시도. 새 폴더 구조가 생기면 여기에 추가.
 - **PyTorch 설치**: `environment.yml`은 conda 채널의 거대한 `pytorch-cuda` 를 피하고 PyTorch 공식 pip wheel 을 사용. 한국 네트워크에서 끊김 문제 때문이니 conda 채널로 되돌리지 말 것.
 
