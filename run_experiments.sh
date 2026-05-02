@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 5번의 실험을 순차 실행한 뒤 결과를 분석한다.
+# 6번의 실험을 순차 실행한 뒤 결과를 분석한다.
+# history_*.json 이 이미 존재하는 실험은 건너뛴다.
 #
 # 사용법:
 #   bash run_experiments.sh
@@ -17,11 +18,19 @@ run_exp() {
     local backbone=$1
     local loss_type=$2
     shift 2
+    local log_file="$OUTPUT_DIR/history_${backbone}_${loss_type}.json"
+
     echo ""
     echo "=========================================="
     echo "  backbone  : $backbone"
     echo "  loss_type : $loss_type"
     echo "=========================================="
+
+    if [ -f "$log_file" ]; then
+        echo "  [SKIP] 이미 완료된 실험입니다: $log_file"
+        return
+    fi
+
     python main.py \
         --data_dir    "$DATA_DIR" \
         --backbone    "$backbone" \
@@ -46,6 +55,7 @@ run_exp mobilenetv3_large_100  ce
 # Phase 2: 메인 실험 (최적 backbone × CE vs CB-Focal)
 # ------------------------------------------------------------------
 run_exp efficientnet_b3 cb_focal --beta 0.999 --gamma 2.0
+run_exp densenet121     cb_focal --beta 0.999 --gamma 2.0
 
 # ------------------------------------------------------------------
 # 결과 분석

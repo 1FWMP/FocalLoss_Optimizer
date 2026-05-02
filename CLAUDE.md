@@ -22,10 +22,11 @@ EfficientNet-B3 (timm) 위에서 비교한다.
 | Phase | 목적 | 실험 내용 |
 |---|---|---|
 | 1 | Backbone 비교 | ResNet-50 / DenseNet-121 / MobileNetV3-Large / EfficientNet-B3 × CE |
-| 2 | 메인 실험 | EfficientNet-B3 × CE vs CB-Focal |
+| 2 | 메인 실험 | EfficientNet-B3 × CE vs CB-Focal, DenseNet-121 × CE vs CB-Focal |
 
 - Phase 1 은 CE 고정으로 backbone 변수만 분리해 비교
-- Phase 2 에서 loss function 트레이드오프 분석 (CB-Focal 하이퍼파라미터 포함)
+- Phase 1 결과 DenseNet-121이 Best Macro F1 0.7817로 최고 backbone으로 확인
+- Phase 2 에서 loss function 트레이드오프 분석 (EfficientNet-B3 및 DenseNet-121 대상)
 
 ## 2. 디렉토리 구조
 
@@ -61,7 +62,8 @@ conda activate focal-ham10000
 # 데이터 다운로드 (Kaggle 인증 필요할 수 있음)
 python download_data.py --data_dir ./data
 
-# 전체 실험 한번에 실행 (5번 순차 + 결과 분석)
+# 전체 실험 한번에 실행 (6번 순차 + 결과 분석)
+# 이미 history_*.json 이 존재하는 실험은 자동으로 건너뜀
 bash run_experiments.sh
 # 데이터 경로가 다를 경우:
 DATA_DIR=/path/to/data bash run_experiments.sh
@@ -72,6 +74,10 @@ python main.py --data_dir ./data --backbone efficientnet_b3 --loss_type ce --epo
 
 # Class-Balanced Focal Loss (EfficientNet-B3)
 python main.py --data_dir ./data --backbone efficientnet_b3 --loss_type cb_focal \
+    --beta 0.999 --gamma 2.0 --epochs 30 --batch_size 32 --lr 1e-4
+
+# Class-Balanced Focal Loss (DenseNet-121, Phase 2 추가 실험)
+python main.py --data_dir ./data --backbone densenet121 --loss_type cb_focal \
     --beta 0.999 --gamma 2.0 --epochs 30 --batch_size 32 --lr 1e-4
 
 # Backbone 비교 예시 (ResNet-50)

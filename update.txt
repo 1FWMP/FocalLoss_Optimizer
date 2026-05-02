@@ -110,3 +110,46 @@ outputs/
     └── learning_curves.png
 
 ============================================================
+  업데이트 내역
+  날짜: 2026-05-02 (추가)
+============================================================
+
+[ 배경 ]
+Phase 1 결과, DenseNet-121이 CE 기준 Best Macro F1 0.7817로 최고 backbone으로
+확인됨. 기존 Phase 2는 EfficientNet-B3를 대상으로만 진행되어 실험 논리에 공백이
+있었음. DenseNet-121 × CB-Focal 실험을 추가해 "최적 backbone × loss 비교"를 완성.
+
+------------------------------------------------------------
+  수정된 파일
+------------------------------------------------------------
+
+[1] run_experiments.sh
+  - 실험 수: 5번 → 6번
+  - 스킵 로직 추가
+      history_{backbone}_{loss_type}.json 이 이미 존재하면 해당 실험 건너뜀
+      재실행 시 완료된 실험을 다시 돌리지 않아도 됨
+  - Phase 2에 densenet121 × cb_focal (beta=0.999, gamma=2.0) 추가
+
+------------------------------------------------------------
+  outputs/ 최종 구조
+------------------------------------------------------------
+
+outputs/
+├── best_model_efficientnet_b3_ce.pth
+├── best_model_efficientnet_b3_cb_focal.pth
+├── best_model_resnet50_ce.pth
+├── best_model_densenet121_ce.pth
+├── best_model_densenet121_cb_focal.pth       ← 신규
+├── best_model_mobilenetv3_large_100_ce.pth
+├── history_efficientnet_b3_ce.json
+├── history_efficientnet_b3_cb_focal.json
+├── history_resnet50_ce.json
+├── history_densenet121_ce.json
+├── history_densenet121_cb_focal.json          ← 신규
+├── history_mobilenetv3_large_100_ce.json
+├── summary.csv
+└── plots/
+    ├── f1_comparison.png
+    └── learning_curves.png
+
+============================================================
