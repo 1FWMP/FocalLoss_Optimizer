@@ -305,6 +305,16 @@ def main() -> None:
         gamma=args.gamma,
     ).to(device)
 
+    # CB-Focal 사용 시 클래스별 alpha (= criterion.class_weights) 값을 한 번 출력.
+    # 학습 흐름에는 영향 없음.
+    if args.loss_type == "cb_focal":
+        alpha = criterion.class_weights.detach().cpu().numpy()
+        alpha_str = ", ".join(
+            f"{cls}={a:.4f}" for cls, a in zip(HAM10000_CLASSES, alpha)
+        )
+        print(f"[INFO] CB-Focal alpha         : {alpha_str}")
+        print(f"[INFO] alpha sum              : {float(alpha.sum()):.4f}  (== num_classes={NUM_CLASSES})")
+
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
