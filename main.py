@@ -78,6 +78,11 @@ def parse_args() -> argparse.Namespace:
                         help="저장할 모델 파일명 (미지정 시 best_model_{backbone}_{loss_type}.pth)")
     parser.add_argument("--no_pretrained", action="store_true",
                         help="ImageNet 사전학습 가중치 미사용 (디버깅용)")
+    parser.add_argument("--run_name", type=str, default=None,
+                        help="실험 고유 이름 (미지정 시 {backbone}_{loss_type}). 모델/히스토리 파일 prefix 로 사용됨")
+    parser.add_argument("--use_cutmix", action="store_true", help="CutMix augmentation 적용")
+    parser.add_argument("--use_elastic", action="store_true", help="Elastic Transform 적용")
+    parser.add_argument("--use_colorjitter", action="store_true", help="Color Jitter 적용")
     return parser.parse_args()
 
 
@@ -95,18 +100,55 @@ def set_seed(seed: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Transforms / Dataloader
+# 3. CutMix helper
+# ---------------------------------------------------------------------------
+def cutmix_batch(
+    images: torch.Tensor, labels: torch.Tensor, alpha: float = 1.0
+) -> tuple[float, torch.Tensor, torch.Tensor, torch.Tensor]:
+    lam = float(np.random.beta(alpha, alpha))
+    rand_idx = torch.randperm(images.size(0), device=images.device)
+    _, _, H, W = images.shape
+    cut_ratio = np.sqrt(1.0 - lam)
+    cut_h, cut_w = int(H * cut_ratio), int(W * cut_ratio)
+    cx, cy = np.random.randint(W), np.random.randint(H)
+    x1 = max(cx - cut_w // 2, 0);  x2 = min(cx + cut_w // 2, W)
+    y1 = max(cy - cut_h // 2, 0);  y2 = min(cy + cut_h // 2, H)
+    images = images.clone()
+    images[:, :, y1:y2, x1:x2] = images[rand_idx, :, y1:y2, x1:x2]
+    lam = 1.0 - (y2 - y1) * (x2 - x1) / (H * W)  # 실제 mix 비율 재계산
+    return lam, images, labels, labels[rand_idx]
+
+
+# ---------------------------------------------------------------------------
+# 4. Transforms / Dataloader
 # ---------------------------------------------------------------------------
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
-def build_transforms() -> Tuple[transforms.Compose, transforms.Compose]:
-    """학습/검증용 augmentation 정의."""
-    train_tf = transforms.Compose([
+def build_transforms(args: argparse.Namespace) -> Tuple[transforms.Compose, transforms.Compose]:
+    """학습/검증용 augmentation 정의.
+
+    Baseline: RandomResizedCrop + HorizontalFlip + VerticalFlip
+    옵션 (args 플래그로 on/off):
+      --use_colorjitter : Color Jitter (brightness/contrast/saturation/hue)
+      --use_elastic     : Elastic Transform
+      --use_cutmix      : CutMix (batch-level, train loop 에서 적용)
+    """
+    pil_augs = [
         transforms.RandomResizedCrop(size=300),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomVerticalFlip(p=0.5),
+    ]
+    if args.use_colorjitter:
+        pil_augs.append(
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1)
+        )
+    if args.use_elastic:
+        pil_augs.append(transforms.ElasticTransform(alpha=50.0, sigma=5.0))
+
+    train_tf = transforms.Compose([
+        *pil_augs,
         transforms.ToTensor(),
         transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
     ])
@@ -162,6 +204,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     epoch: int,
+    use_cutmix: bool = False,
 ) -> float:
     model.train()
     total_loss, total_n = 0.0, 0
@@ -172,8 +215,15 @@ def train_one_epoch(
         labels = labels.to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        logits = model(images)
-        loss = criterion(logits, labels)
+
+        if use_cutmix and np.random.random() > 0.5:
+            lam, images, labels_a, labels_b = cutmix_batch(images, labels)
+            logits = model(images)
+            loss = lam * criterion(logits, labels_a) + (1 - lam) * criterion(logits, labels_b)
+        else:
+            logits = model(images)
+            loss = criterion(logits, labels)
+
         loss.backward()
         optimizer.step()
 
@@ -245,9 +295,16 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    run_name = args.run_name or f"{args.backbone}_{args.loss_type}"
+    if args.run_name is None:
+        args.run_name = run_name  # checkpoint args 에도 기록
+
+    aug_flags = [f for f, on in [("cutmix", args.use_cutmix), ("elastic", args.use_elastic), ("colorjitter", args.use_colorjitter)] if on]
     print(f"[INFO] device                : {device}")
+    print(f"[INFO] run_name              : {run_name}")
     print(f"[INFO] backbone              : {args.backbone}")
     print(f"[INFO] loss_type             : {args.loss_type}")
+    print(f"[INFO] augmentation (extra)  : {aug_flags if aug_flags else 'baseline only'}")
     print(f"[INFO] epochs / bs / lr      : {args.epochs} / {args.batch_size} / {args.lr}")
     if args.loss_type == "cb_focal":
         print(f"[INFO] beta / gamma          : {args.beta} / {args.gamma}")
@@ -266,7 +323,7 @@ def main() -> None:
     print(f"[INFO] image roots           : {[str(p) for p in image_roots]}")
 
     # ---- 5.2 Datasets / Loaders ----------------------------------------------
-    train_tf, val_tf = build_transforms()
+    train_tf, val_tf = build_transforms(args)
     train_set = HAM10000Dataset(train_df, image_roots, transform=train_tf)
     val_set = HAM10000Dataset(val_df, image_roots, transform=val_tf)
 
@@ -324,14 +381,15 @@ def main() -> None:
 
     # ---- 5.4 Training loop ----------------------------------------------------
     best_f1 = -1.0
-    save_name = args.save_name or f"best_model_{args.backbone}_{args.loss_type}.pth"
+    save_name = args.save_name or f"best_model_{run_name}.pth"
     best_path = output_dir / save_name
     history = []
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
         train_loss = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, epoch
+            model, train_loader, criterion, optimizer, device, epoch,
+            use_cutmix=args.use_cutmix,
         )
         val_loss, val_f1, report = validate(
             model, val_loader, criterion, device, epoch
@@ -371,7 +429,7 @@ def main() -> None:
             print(f"  >> Best updated! Macro F1 = {best_f1:.4f}  saved -> {best_path}")
 
     # ---- 5.5 학습 로그 저장 ---------------------------------------------------
-    log_path = output_dir / f"history_{args.backbone}_{args.loss_type}.json"
+    log_path = output_dir / f"history_{run_name}.json"
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump(
             {"best_macro_f1": best_f1, "history": history, "args": vars(args)},

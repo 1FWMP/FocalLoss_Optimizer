@@ -17,42 +17,30 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-LOSS_TYPES = ["cb_focal", "ce"]  # 긴 것을 먼저 매칭해야 오파싱 방지
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_dir", type=str, default="./outputs")
     return parser.parse_args()
 
 
-def _parse_stem(stem: str) -> tuple[str, str] | None:
-    """history_{backbone}_{loss_type} → (backbone, loss_type)."""
-    prefix = "history_"
-    if not stem.startswith(prefix):
-        return None
-    body = stem[len(prefix):]
-    for lt in LOSS_TYPES:
-        if body.endswith(f"_{lt}"):
-            backbone = body[: -(len(lt) + 1)]
-            return backbone, lt
-    return None
-
-
 def load_histories(output_dir: Path) -> dict[str, dict]:
+    """history_*.json 을 모두 읽어 dict 로 반환.
+
+    실험 키(run_name)는 JSON 내부 args.run_name 을 우선 사용하고,
+    없으면 args.backbone + args.loss_type 으로 폴백 (구버전 호환).
+    """
     histories: dict[str, dict] = {}
     for path in sorted(output_dir.glob("history_*.json")):
-        parsed = _parse_stem(path.stem)
-        if parsed is None:
-            print(f"[WARN] 파싱 실패, 건너뜀: {path.name}")
-            continue
-        backbone, loss_type = parsed
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        key = f"{backbone}_{loss_type}"
-        histories[key] = {
+        saved_args = data.get("args", {})
+        backbone  = saved_args.get("backbone", "unknown")
+        loss_type = saved_args.get("loss_type", "ce")
+        run_name  = saved_args.get("run_name") or f"{backbone}_{loss_type}"
+        histories[run_name] = {
             "backbone":      backbone,
             "loss_type":     loss_type,
+            "run_name":      run_name,
             "best_macro_f1": data["best_macro_f1"],
             "history":       data["history"],
         }

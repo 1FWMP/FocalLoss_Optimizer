@@ -2,7 +2,7 @@
 
 HAM10000 (피부 병변, 7-class) 미세 분류 실험.
 **Cross-Entropy** vs **Class-Balanced Focal Loss (Cui et al., 2019)** 의 성능을
-EfficientNet-B3 (timm) 위에서 비교한다.
+다양한 backbone 과 augmentation 조합 위에서 비교한다.
 
 ## 1. 환경 세팅
 
@@ -61,14 +61,33 @@ data/
 
 ## 3. 학습 실행
 
-### Cross-Entropy 베이스라인
+### 전체 실험 자동 실행 (권장)
 ```bash
-python main.py --data_dir ./data --loss_type ce --epochs 30 --batch_size 32 --lr 1e-4
+# Step 1(ResNet depth 비교) → Step 2(aug 8 조합) → 결과 분석 자동 수행
+bash run_experiments.sh
+# 데이터 경로가 다를 경우:
+DATA_DIR=/path/to/data bash run_experiments.sh
 ```
 
-### Class-Balanced Focal Loss
+### 개별 실행 예시
+
+#### Cross-Entropy 베이스라인
 ```bash
-python main.py --data_dir ./data --loss_type cb_focal \
+python main.py --data_dir ./data --backbone resnet101 --loss_type ce \
+    --epochs 30 --batch_size 32 --lr 1e-4
+```
+
+#### Augmentation 조합 (CutMix + Elastic + ColorJitter)
+```bash
+python main.py --data_dir ./data --backbone resnet101 --loss_type ce \
+    --use_cutmix --use_elastic --use_colorjitter \
+    --run_name resnet101_ce_cm_el_cj \
+    --epochs 30 --batch_size 32 --lr 1e-4
+```
+
+#### Class-Balanced Focal Loss
+```bash
+python main.py --data_dir ./data --backbone densenet121 --loss_type cb_focal \
     --beta 0.999 --gamma 2.0 \
     --epochs 30 --batch_size 32 --lr 1e-4
 ```
@@ -77,20 +96,25 @@ python main.py --data_dir ./data --loss_type cb_focal \
 - `train_loss`, `val_loss`
 - 클래스별 F1 + **Macro F1** (`sklearn.classification_report`)
 
-Best Macro F1 갱신 시 `outputs/best_model.pth` 로 저장되며,
-학습 이력은 `outputs/history_<loss_type>.json` 에 기록된다.
+Best Macro F1 갱신 시 `outputs/best_model_{run_name}.pth` 로 저장되며,
+학습 이력은 `outputs/history_{run_name}.json` 에 기록된다.
 
 ## 4. CLI 인자 요약
 
 | 인자 | 기본값 | 설명 |
 | --- | --- | --- |
 | `--data_dir` | (필수) | 메타데이터/이미지 루트 디렉토리 |
+| `--backbone` | `efficientnet_b3` | 사용할 backbone (아래 목록 참고) |
 | `--loss_type` | `ce` | `ce` 또는 `cb_focal` |
 | `--epochs` | 30 | 학습 에포크 수 |
 | `--batch_size` | 32 | 배치 사이즈 |
 | `--lr` | 1e-4 | 학습률 (AdamW) |
 | `--beta` | 0.999 | CB Loss 의 beta |
 | `--gamma` | 2.0 | Focal Loss 의 gamma |
+| `--run_name` | `{backbone}_{loss_type}` | 실험 고유 이름 (파일 저장 prefix) |
+| `--use_cutmix` | False | CutMix augmentation 적용 (batch-level) |
+| `--use_elastic` | False | Elastic Transform 적용 |
+| `--use_colorjitter` | False | Color Jitter 적용 |
 | `--val_size` | 0.2 | 검증 비율 (lesion 단위 stratified split) |
 | `--seed` | 42 | 재현성 시드 |
 | `--num_workers` | 4 | DataLoader 워커 수 |
@@ -100,15 +124,33 @@ Best Macro F1 갱신 시 `outputs/best_model.pth` 로 저장되며,
 
 ```
 FocalLoss_Optimizer/
-├── main.py            # 학습/검증 엔트리포인트
+├── main.py            # 학습/검증 엔트리포인트 (aug 플래그, run_name, CutMix 포함)
 ├── dataset.py         # HAM10000Dataset, 이미지 경로 탐색, 메타 로딩
 ├── losses.py          # CBFocalLoss + build_loss factory
-├── model.py           # EfficientNet-B3 (timm) 빌더
+├── model.py           # SUPPORTED_BACKBONES + build_model factory (timm)
+├── eval_accuracy.py   # 저장된 .pth 일괄 평가 (Accuracy / F1 / Precision / Recall)
+├── analyze_results.py # summary.csv + 학습 곡선 시각화
+├── run_experiments.sh # Step1(ResNet depth) → Step2(aug 8조합) 자동 실행
 ├── download_data.py   # Kaggle 미러에서 HAM10000 받기
 ├── environment.yml    # conda 환경
 ├── requirements.txt   # pip 의존성
-└── outputs/           # 학습 결과 (best_model.pth, history JSON)
+└── outputs/           # 학습 결과
+    ├── best_model_{run_name}.pth
+    ├── history_{run_name}.json
+    ├── summary.csv
+    └── plots/
 ```
+
+### 지원 backbone
+
+| 키 | 비고 |
+| --- | --- |
+| `efficientnet_b3` | Phase 1·2 실험 대상 |
+| `resnet50` | Phase 1 실험 대상 |
+| `resnet101` | Step 1 실험 대상 |
+| `resnet152` | Step 1 실험 대상 |
+| `densenet121` | Phase 1·2 최고 성능 (Macro F1 0.7817) |
+| `mobilenetv3_large_100` | Phase 1 실험 대상 |
 
 ## 6. 구현 노트
 
@@ -116,7 +158,17 @@ FocalLoss_Optimizer/
   - Effective Number of Samples: `E_n = (1 - β^n_c) / (1 - β)`
   - 클래스 가중치: `α_c = 1/E_n` 후 합 = `num_classes` 가 되도록 정규화
   - `log_softmax + clamp(eps=1e-7)` 으로 수치 안정성 확보
+- **CutMix**: `main.py:cutmix_batch`
+  - Beta(1,1) 분포에서 λ 샘플링 → 랜덤 패치 교환 → 실제 픽셀 비율로 λ 재계산
+  - loss = λ·criterion(logits, labels_a) + (1−λ)·criterion(logits, labels_b) 로 CE/CB-Focal 모두 호환
+  - 50% 확률로 적용 (`--use_cutmix` 플래그로 활성화)
+- **Augmentation 조합 실험**: `run_experiments.sh` Step 2
+  - Baseline(Resize+Crop+Flip) 위에 CutMix / ElasticTransform / ColorJitter 각각 on/off → 2³=8 조합
+  - ElasticTransform: `torchvision.transforms.ElasticTransform(alpha=50.0, sigma=5.0)`
+  - ColorJitter: brightness/contrast/saturation ±0.2, hue ±0.1
 - **데이터 누수 방지**: 동일 `lesion_id` 의 이미지는 train/val 한쪽에만 들어가도록
   lesion 단위 stratified split 을 수행 (`main.py:split_train_val`).
 - **평가 지표**: 데이터 불균형이 심해 정확도는 다수 클래스(`nv`) 에 끌려가므로
   **Macro F1** 을 best 모델 선정 기준으로 사용한다.
+- **평가 스크립트** (`eval_accuracy.py`): 전체 Accuracy / Macro F1 / Macro Precision / Macro Recall
+  + 클래스별(akiec~vasc) Accuracy / F1 / Precision / Recall 을 테이블 형태로 출력.

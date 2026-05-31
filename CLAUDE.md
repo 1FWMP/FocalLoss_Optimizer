@@ -12,21 +12,23 @@
 
 **FocalLoss_Optimizer** — HAM10000 (피부 병변, 7-class) 미세 분류 실험.
 **Cross-Entropy** vs **Class-Balanced Focal Loss (Cui et al., CVPR 2019)** 의 성능을
-EfficientNet-B3 (timm) 위에서 비교한다.
+다양한 backbone 과 augmentation 조합 위에서 비교한다.
 
 - 평가 지표: **Macro F1** (클래스 불균형이 심해 accuracy 대신 사용)
 - 데이터 누수 방지: 동일 `lesion_id` 가 train/val 양쪽에 들어가지 않도록 lesion 단위 stratified split
 
-### 실험 구조 (2단계)
+### 실험 구조 (4단계)
 
 | Phase | 목적 | 실험 내용 |
 |---|---|---|
-| 1 | Backbone 비교 | ResNet-50 / DenseNet-121 / MobileNetV3-Large / EfficientNet-B3 × CE |
-| 2 | 메인 실험 | EfficientNet-B3 × CE vs CB-Focal, DenseNet-121 × CE vs CB-Focal |
+| 1 | Backbone 비교 (완료) | ResNet-50 / DenseNet-121 / MobileNetV3-Large / EfficientNet-B3 × CE |
+| 2 | Loss 비교 (완료) | EfficientNet-B3 × CE vs CB-Focal, DenseNet-121 × CE vs CB-Focal |
+| 3 | ResNet depth 비교 | ResNet-101 vs ResNet-152 (baseline aug + CE) → 더 높은 F1 backbone 선택 |
+| 4 | Augmentation 비교 | 선택된 ResNet × CE × 2³=8 조합 (CutMix / Elastic / ColorJitter on/off) |
 
-- Phase 1 은 CE 고정으로 backbone 변수만 분리해 비교
-- Phase 1 결과 DenseNet-121이 Best Macro F1 0.7817로 최고 backbone으로 확인
-- Phase 2 에서 loss function 트레이드오프 분석 (EfficientNet-B3 및 DenseNet-121 대상)
+- Phase 1 결과: DenseNet-121이 Best Macro F1 0.7817로 최고 backbone 확인
+- Phase 3·4 는 `run_experiments.sh` 가 순서대로 자동 실행하며 Step 1→2 winner 선택도 자동화
+- (예정) Phase 5: 최고 aug 조합 고정 후 CB-Focal gamma 튜닝 (0.5 / 1.0 / 1.5 / 2.0 / 2.5 / 3.0)
 
 ## 2. 디렉토리 구조
 
@@ -37,15 +39,15 @@ FocalLoss_Optimizer/
 ├── losses.py             # CBFocalLoss + build_loss factory
 ├── model.py              # SUPPORTED_BACKBONES + build_model factory (timm)
 ├── download_data.py      # Kaggle 미러에서 HAM10000 받기
-├── run_experiments.sh    # 5번 실험 순차 실행 + 결과 분석 호출
-├── analyze_results.py    # summary.csv + 시각화 이미지 생성
+├── run_experiments.sh    # Step1(ResNet depth) → Step2(8 aug 조합) 자동 순차 실행
+├── analyze_results.py    # summary.csv + 시각화 이미지 생성 (run_name 기반)
 ├── environment.yml       # conda 환경 (파이썬만 conda, 나머지는 pip)
 ├── requirements.txt      # pip 의존성
 ├── README.md             # 사용자/팀원용 문서
 ├── CLAUDE.md             # ← 이 파일 (Claude Code 가이드)
 └── outputs/              # 학습 결과
-    ├── best_model_{backbone}_{loss_type}.pth
-    ├── history_{backbone}_{loss_type}.json
+    ├── best_model_{run_name}.pth     # run_name = --run_name 또는 {backbone}_{loss_type}
+    ├── history_{run_name}.json
     ├── summary.csv
     └── plots/
         ├── f1_comparison.png
@@ -62,26 +64,28 @@ conda activate focal-ham10000
 # 데이터 다운로드 (Kaggle 인증 필요할 수 있음)
 python download_data.py --data_dir ./data
 
-# 전체 실험 한번에 실행 (6번 순차 + 결과 분석)
-# 이미 history_*.json 이 존재하는 실험은 자동으로 건너뜀
+# 전체 실험 자동 실행 (Step1: ResNet depth → Step2: 8 aug 조합 → 결과 분석)
+# 이미 history_{run_name}.json 이 존재하는 실험은 자동으로 건너뜀
 bash run_experiments.sh
 # 데이터 경로가 다를 경우:
 DATA_DIR=/path/to/data bash run_experiments.sh
 
 # 개별 실행 예시
-# Cross-Entropy 베이스라인 (EfficientNet-B3)
-python main.py --data_dir ./data --backbone efficientnet_b3 --loss_type ce --epochs 30 --batch_size 32 --lr 1e-4
+# ResNet-101 baseline (Step 1)
+python main.py --data_dir ./data --backbone resnet101 --loss_type ce --epochs 30 --batch_size 32 --lr 1e-4
+
+# ResNet-101 + CutMix + ColorJitter (Step 2 조합 예시)
+python main.py --data_dir ./data --backbone resnet101 --loss_type ce \
+    --use_cutmix --use_colorjitter \
+    --run_name resnet101_ce_cm_cj \
+    --epochs 30 --batch_size 32 --lr 1e-4
 
 # Class-Balanced Focal Loss (EfficientNet-B3)
 python main.py --data_dir ./data --backbone efficientnet_b3 --loss_type cb_focal \
     --beta 0.999 --gamma 2.0 --epochs 30 --batch_size 32 --lr 1e-4
 
-# Class-Balanced Focal Loss (DenseNet-121, Phase 2 추가 실험)
-python main.py --data_dir ./data --backbone densenet121 --loss_type cb_focal \
-    --beta 0.999 --gamma 2.0 --epochs 30 --batch_size 32 --lr 1e-4
-
-# Backbone 비교 예시 (ResNet-50)
-python main.py --data_dir ./data --backbone resnet50 --loss_type ce --epochs 30 --batch_size 32 --lr 1e-4
+# 결과 평가 (Accuracy / Macro F1 / Precision / Recall + 클래스별 전체)
+python eval_accuracy.py
 
 # 결과 분석만 별도 실행
 python analyze_results.py --output_dir ./outputs
@@ -93,6 +97,8 @@ python analyze_results.py --output_dir ./outputs
 |---|---|
 | `efficientnet_b3` | efficientnet_b3 |
 | `resnet50` | resnet50 |
+| `resnet101` | resnet101 |
+| `resnet152` | resnet152 |
 | `densenet121` | densenet121 |
 | `mobilenetv3_large_100` | mobilenetv3_large_100 |
 
@@ -104,7 +110,10 @@ python analyze_results.py --output_dir ./outputs
 - **CB-Focal 가중치 정규화**: `losses.py:CBFocalLoss` 에서 `weights / weights.sum() * num_classes` (논문 official impl 컨벤션). 임의로 빼지 말 것.
 - **수치 안정성**: focal loss 계산은 `log_softmax + clamp(eps=1e-7)` 조합 유지.
 - **재현성**: `main.py:set_seed` 에서 `cudnn.deterministic=True, benchmark=False`. 속도 우선이 필요하면 별도 플래그로 분리할 것 (현재 코드를 직접 바꾸지 말 것).
-- **Best 모델 기준**: Macro F1 (accuracy 아님). `outputs/best_model_{backbone}_{loss_type}.pth`.
+- **Best 모델 기준**: Macro F1 (accuracy 아님). `outputs/best_model_{run_name}.pth`.
+- **run_name 규칙**: `--run_name` 미지정 시 `{backbone}_{loss_type}` 로 자동 생성. 모델·히스토리 파일명과 eval 출력 레이블 모두 이 값 사용. `run_experiments.sh` 의 aug 실험은 `{backbone}_ce_{aug_tag}` 형식 (예: `resnet101_ce_cm_el`).
+- **CutMix**: `main.py:cutmix_batch` 에서 구현. batch-level 적용이므로 transforms 가 아닌 train loop 내부에서 실행. loss = λ·L(a) + (1−λ)·L(b) 형태로 CE·CB-Focal 모두 호환.
+- **Elastic Transform**: torchvision `>=0.12` 의 `transforms.ElasticTransform(alpha=50.0, sigma=5.0)` 사용. PIL 단계에서 적용 (`ToTensor` 앞).
 - **이미지 루트 탐색**: `dataset.py:discover_image_roots` 가 `images/`, `HAM10000_images_part_{1,2}/`, `ham10000_images/`, `data_dir` 자체를 모두 시도. 새 폴더 구조가 생기면 여기에 추가.
 - **PyTorch 설치**: `environment.yml`은 conda 채널의 거대한 `pytorch-cuda` 를 피하고 PyTorch 공식 pip wheel 을 사용. 한국 네트워크에서 끊김 문제 때문이니 conda 채널로 되돌리지 말 것.
 

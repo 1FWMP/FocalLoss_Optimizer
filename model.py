@@ -12,6 +12,8 @@ import torch.nn as nn
 SUPPORTED_BACKBONES: dict[str, str] = {
     "efficientnet_b3":       "efficientnet_b3",
     "resnet50":              "resnet50",
+    "resnet101":             "resnet101",
+    "resnet152":             "resnet152",
     "densenet121":           "densenet121",
     "mobilenetv3_large_100": "mobilenetv3_large_100",
 }
