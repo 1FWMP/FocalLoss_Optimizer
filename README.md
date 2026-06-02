@@ -164,6 +164,7 @@ FocalLoss_Optimizer/
 ├── run_single_aug_search.sh    # stage1: 8기법 단독 튜닝
 ├── run_combination_experiments.sh # stage2: 조합 히트맵 + stage3 greedy
 ├── run_greedy_forward.py       # stage3: greedy forward selection
+├── run_all_aug.sh              # stage1→2(+3)→4 일괄 실행 래퍼
 ├── analyze_combinations.py     # 8x8 히트맵 + combination_summary.csv
 ├── measure_epoch_time.sh       # epoch당 시간 측정 헬퍼
 ├── download_data.py   # Kaggle 미러에서 HAM10000 받기
@@ -302,15 +303,20 @@ HAM10000 은 `nv`(양성 모반) 가 전체의 ~67% 를 차지하는 **극심한
 # (0) epoch당 시간 측정 → 총 소요시간 가늠
 bash measure_epoch_time.sh
 
-# (1) 단독 튜닝 → outputs/optuna_best_per_aug.json
-bash run_single_aug_search.sh
+# (1)~(4) 한 번에: stage1 → stage2(+3) → stage4
+bash run_all_aug.sh
 
-# (2)+(3) 조합 히트맵 + greedy (RUN_GREEDY=1 기본)
-bash run_combination_experiments.sh
-
-# (4) joint 검증 baseline
-bash run_optuna_search.sh
+# 단계별로 따로 돌리려면:
+bash run_single_aug_search.sh        # (1) 단독 튜닝 → outputs/optuna_best_per_aug.json
+bash run_combination_experiments.sh  # (2)+(3) 조합 히트맵 + greedy (RUN_GREEDY=1 기본)
+bash run_optuna_search.sh            # (4) joint 검증 baseline
 ```
 
-데이터 경로/예산은 환경변수로 조절한다(예:
-`DATA_DIR=/path N_TRIALS=12 EPOCHS=15 bash run_single_aug_search.sh`).
+데이터 경로/예산은 환경변수를 prefix 로 한 번만 주면 하위 스크립트에 모두 전달된다.
+장시간(~20h+) 작업이므로 백그라운드 실행을 권장한다.
+
+```bash
+DATA_DIR=/path/to/data EPOCHS=15 N_TRIALS=12 bash run_all_aug.sh
+DATA_DIR=/path/to/data nohup bash run_all_aug.sh > run_all_aug.log 2>&1 &
+tail -f run_all_aug.log
+```

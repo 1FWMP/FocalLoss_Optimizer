@@ -46,6 +46,7 @@ FocalLoss_Optimizer/
 ├── run_single_aug_search.sh   # stage1: 8기법 단독 튜닝 → optuna_best_per_aug.json
 ├── run_combination_experiments.sh # stage2: 조합 히트맵(37런) + stage3 greedy 호출
 ├── run_greedy_forward.py      # stage3: 최고 pair부터 greedy forward selection
+├── run_all_aug.sh             # stage1→2(+3)→4 일괄 실행 래퍼
 ├── analyze_combinations.py    # 조합 결과 → 8x8 히트맵 + combination_summary.csv
 ├── measure_epoch_time.sh # resnet50 epoch당 시간 측정 헬퍼 (실험 총 소요시간 추정용)
 ├── analyze_results.py    # summary.csv + 시각화 이미지 생성 (run_name 기반)
@@ -91,9 +92,13 @@ python main.py --optuna --data_dir ./data --backbone resnet50 --loss_type ce \
 bash measure_epoch_time.sh
 
 # Augmentation 방법론 4단계 (자세한 설계·논리는 README "7. Augmentation 실험 방법론")
+bash run_all_aug.sh                  # stage1→2(+3)→4 일괄 (환경변수는 prefix 로 1회만)
+# 또는 단계별 개별 실행:
 bash run_single_aug_search.sh        # stage1 단독 튜닝 → optuna_best_per_aug.json
 bash run_combination_experiments.sh  # stage2 히트맵 + stage3 greedy
 bash run_optuna_search.sh            # stage4 joint 검증 baseline
+# 장시간 작업이므로 백그라운드 권장:
+#   DATA_DIR=/path nohup bash run_all_aug.sh > run_all_aug.log 2>&1 &
 # 개별 호출 예:
 python main.py --search_aug noise --data_dir ./data --backbone resnet50 --loss_type ce
 python main.py --combo_augs "crop,rotate" --aug_params_json ./outputs/optuna_best_per_aug.json \
