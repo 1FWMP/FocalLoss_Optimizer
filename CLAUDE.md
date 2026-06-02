@@ -42,7 +42,11 @@ FocalLoss_Optimizer/
 ├── model.py              # SUPPORTED_BACKBONES + build_model factory (timm)
 ├── download_data.py      # Kaggle 미러에서 HAM10000 받기
 ├── run_experiments.sh    # Step1(ResNet depth) → Step2(8 aug 조합) 자동 순차 실행
-├── run_optuna_search.sh  # Optuna 증강 파라미터 탐색 (resnet50 고정, resume 지원)
+├── run_optuna_search.sh  # joint Optuna 탐색 (8기법 동시, 검증 baseline용)
+├── run_single_aug_search.sh   # stage1: 8기법 단독 튜닝 → optuna_best_per_aug.json
+├── run_combination_experiments.sh # stage2: 조합 히트맵(37런) + stage3 greedy 호출
+├── run_greedy_forward.py      # stage3: 최고 pair부터 greedy forward selection
+├── analyze_combinations.py    # 조합 결과 → 8x8 히트맵 + combination_summary.csv
 ├── measure_epoch_time.sh # resnet50 epoch당 시간 측정 헬퍼 (실험 총 소요시간 추정용)
 ├── analyze_results.py    # summary.csv + 시각화 이미지 생성 (run_name 기반)
 ├── environment.yml       # conda 환경 (파이썬만 conda, 나머지는 pip)
@@ -85,6 +89,15 @@ python main.py --optuna --data_dir ./data --backbone resnet50 --loss_type ce \
 
 # epoch당 시간 측정 (실험 총 소요시간 추정용, 두 번째 epoch 의 time= 값 확인)
 bash measure_epoch_time.sh
+
+# Augmentation 방법론 4단계 (자세한 설계·논리는 README "7. Augmentation 실험 방법론")
+bash run_single_aug_search.sh        # stage1 단독 튜닝 → optuna_best_per_aug.json
+bash run_combination_experiments.sh  # stage2 히트맵 + stage3 greedy
+bash run_optuna_search.sh            # stage4 joint 검증 baseline
+# 개별 호출 예:
+python main.py --search_aug noise --data_dir ./data --backbone resnet50 --loss_type ce
+python main.py --combo_augs "crop,rotate" --aug_params_json ./outputs/optuna_best_per_aug.json \
+    --data_dir ./data --backbone resnet50 --loss_type ce --epochs 15
 
 # 개별 실행 예시
 # ResNet-101 baseline (Step 1)
@@ -130,9 +143,16 @@ python analyze_results.py --output_dir ./outputs
 - **run_name 규칙**: `--run_name` 미지정 시 `{backbone}_{loss_type}` 로 자동 생성. 모델·히스토리 파일명과 eval 출력 레이블 모두 이 값 사용. `run_experiments.sh` 의 aug 실험은 `{backbone}_ce_{aug_tag}` 형식 (예: `resnet101_ce_cm_el`).
 - **CutMix**: `main.py:cutmix_batch` 에서 구현. batch-level 적용이므로 transforms 가 아닌 train loop 내부에서 실행. loss = λ·L(a) + (1−λ)·L(b) 형태로 CE·CB-Focal 모두 호환.
 - **Elastic Transform**: torchvision `>=0.12` 의 `transforms.ElasticTransform(alpha=50.0, sigma=5.0)` 사용. PIL 단계에서 적용 (`ToTensor` 앞).
-- **두 가지 증강 경로 (혼동 주의)**:
+- **세 가지 증강 경로 (혼동 주의)**:
   - 단일 학습 모드는 `main.py:build_transforms(args)` — `--use_cutmix/--use_elastic/--use_colorjitter` 플래그 기반 (기존 방식, 그대로 유지).
-  - Optuna 탐색 모드는 `transforms.py:build_transforms(aug_params)` — trial 이 넘기는 파라미터 dict 로 동적 조립. main.py 에서는 `build_optuna_transforms` 별칭으로 import.
+  - joint Optuna 탐색 모드는 `transforms.py:build_transforms(aug_params)` — trial 이 넘기는 12개 파라미터 dict 로 동적 조립. main.py 에서 `build_optuna_transforms` 별칭. baseline 에 RandomResizedCrop+flip 포함.
+  - 단독 튜닝/조합 모드는 `transforms.py:build_controlled_transforms(active_augs, aug_params)` — `active_augs` 에 든 기법만 켜고 나머지 OFF. baseline=`Resize+CenterCrop`(flip 제외, 무증강). 각 기법 prob=1.0 적용(sobel 만 확률이 파라미터).
+- **Augmentation 4단계 방법론** (상세 설계·논리는 **README 7장**):
+  - stage1 `--search_aug {aug}`: 기법 1개만 단독 Optuna 튜닝(강도만 탐색, study=`singleaug_{aug}`) → `outputs/optuna_best_per_aug.json` 누적.
+  - stage2 `--combo_augs "a,b"` `--aug_params_json ...`: 고정 파라미터로 조합 1회 학습. run_name=`combo_{정렬된_aug들}`(대칭), baseline=`combo_base`. → `analyze_combinations.py` 가 `history_combo_*.json` 파싱해 8×8 히트맵.
+  - stage3 `run_greedy_forward.py`: 최고 pair 부터 margin 이상 개선시만 누적. subprocess 로 main.py 호출하며 history 있으면 재사용.
+  - stage4 joint Optuna(`run_optuna_search.sh`) 와 비교가 최종 검증.
+  - **8기법 이름·순서 고정**: `transforms.py:AUG_NAMES` (crop, rotate, colorjitter, blur, avgblur, sobel, noise, cutout) = 히트맵 축 순서. 바꾸지 말 것.
 - **커스텀 증강 3종** (`transforms.py`): `SobelFilter`(엣지 추출, 확률), `GaussianNoise`(std·확률), `AverageBlur`(홀수 커널·확률). 입력이 PIL/Tensor 모두여도 내부 변환 후 **입력과 동일 타입으로 반환**. 파이프라인 순서: PIL(Crop→Flip→Rotate→ColorJitter→GaussianBlur) → ToTensor → Tensor(AverageBlur→Sobel→Noise) → Normalize → Cutout(RandomErasing).
 - **Optuna 탐색 규칙** (`main.py:run_optuna`):
   - 데이터셋/로더는 1회만 생성하고 trial 마다 `train_set.transform` 만 교체 (디스크 재스캔 회피). val transform 은 고정.

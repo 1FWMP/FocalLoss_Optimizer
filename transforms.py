@@ -35,6 +35,19 @@ IMAGENET_STD = [0.229, 0.224, 0.225]
 # 기본 입력 해상도 (기존 파이프라인과 동일: train crop 300, val resize 320→crop 300)
 DEFAULT_IMAGE_SIZE = 300
 
+# 통제 실험(단독 튜닝 / 조합 히트맵)에서 사용하는 8가지 증강 기법의 정식 이름.
+# 히트맵 축 순서이기도 하다. (어디서도 순서를 바꾸지 말 것)
+AUG_NAMES = (
+    "crop",         # RandomResizedCrop (scale 하한)
+    "rotate",       # RandomRotation (각도)
+    "colorjitter",  # ColorJitter (강도)
+    "blur",         # GaussianBlur (sigma)
+    "avgblur",      # Average(box) Blur (kernel)
+    "sobel",        # Sobel 엣지 (확률)
+    "noise",        # Gaussian Noise (std)
+    "cutout",       # RandomErasing (영역 크기)
+)
+
 
 # ===========================================================================
 # 커스텀 Transform 3종
@@ -262,3 +275,106 @@ def build_transforms(
         ]
     )
     return train_tf, val_tf
+
+
+def _val_transform(image_size: int = DEFAULT_IMAGE_SIZE) -> T.Compose:
+    """검증용 deterministic transform (Resize→CenterCrop→ToTensor→Normalize)."""
+    return T.Compose(
+        [
+            T.Resize(int(round(image_size * 320 / 300))),
+            T.CenterCrop(image_size),
+            T.ToTensor(),
+            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        ]
+    )
+
+
+def build_controlled_transforms(
+    active_augs,
+    aug_params: Dict[str, Any],
+    image_size: int = DEFAULT_IMAGE_SIZE,
+) -> Tuple[T.Compose, T.Compose]:
+    """통제 실험(단독 튜닝 / 조합 히트맵)용 transform 빌더.
+
+    `active_augs` 에 명시된 기법만 적용한다. baseline(아무 기법도 없음) 은
+    `Resize→CenterCrop` (무증강, flip 도 제외) 이며, 여기에 active 기법을 얹는다.
+    각 기법은 **항상 적용(prob=1.0)** 하고 강도/파라미터는 `aug_params` 에서 읽는다.
+    예외) sobel 은 강도 개념이 없어 적용 확률(`sobel_prob`) 자체가 파라미터다.
+
+    Args:
+        active_augs: 적용할 기법 이름들의 컬렉션 (AUG_NAMES 의 부분집합).
+                     비어 있으면 baseline(무증강).
+        aug_params : 기법별 파라미터 dict. 인식 키는 build_transforms 와 동일.
+        image_size : 입력 해상도.
+
+    Returns:
+        (train_tf, val_tf)
+    """
+    active = {str(a).strip() for a in active_augs if str(a).strip()}
+    unknown = active - set(AUG_NAMES)
+    if unknown:
+        raise ValueError(f"알 수 없는 augmentation: {sorted(unknown)}. 가능: {list(AUG_NAMES)}")
+
+    p = aug_params or {}
+
+    # ---- PIL 단계 ----------------------------------------------------------
+    # crop 이 active 면 RandomResizedCrop, 아니면 deterministic Resize+CenterCrop.
+    if "crop" in active:
+        crop_scale_min = float(p.get("crop_scale_min", 0.8))
+        crop_scale_min = min(max(crop_scale_min, 0.05), 1.0)
+        pil_stage = [T.RandomResizedCrop(size=image_size, scale=(crop_scale_min, 1.0))]
+    else:
+        pil_stage = [
+            T.Resize(int(round(image_size * 320 / 300))),
+            T.CenterCrop(image_size),
+        ]
+
+    if "rotate" in active:
+        rotate_deg = float(p.get("rotate_deg", 0.0))
+        if rotate_deg > 0.0:
+            pil_stage.append(T.RandomRotation(degrees=rotate_deg))
+
+    if "colorjitter" in active:
+        cj = float(p.get("colorjitter_strength", 0.0))
+        if cj > 0.0:
+            pil_stage.append(
+                T.ColorJitter(
+                    brightness=cj, contrast=cj, saturation=cj, hue=min(cj * 0.5, 0.5)
+                )
+            )
+
+    if "blur" in active:
+        sigma = max(float(p.get("blur_sigma", 1.0)), 0.1)
+        pil_stage.append(T.GaussianBlur(kernel_size=5, sigma=(sigma, sigma)))  # 항상 적용
+
+    # ---- Tensor 단계 (Normalize 이전) --------------------------------------
+    tensor_stage = []
+    if "avgblur" in active:
+        tensor_stage.append(
+            AverageBlur(kernel_size=int(p.get("avgblur_kernel", 3)), p=1.0)
+        )
+    if "sobel" in active:
+        sp = float(p.get("sobel_prob", 0.0))
+        if sp > 0.0:
+            tensor_stage.append(SobelFilter(p=sp))  # sobel 은 확률이 곧 파라미터
+    if "noise" in active:
+        std = float(p.get("noise_std", 0.0))
+        if std > 0.0:
+            tensor_stage.append(GaussianNoise(std=std, p=1.0))
+
+    # ---- Cutout (Normalize 이후) -------------------------------------------
+    erasing_stage = []
+    if "cutout" in active:
+        cs = max(float(p.get("cutout_scale", 0.1)), 0.02)
+        erasing_stage.append(T.RandomErasing(p=1.0, scale=(0.02, cs), value=0))
+
+    train_tf = T.Compose(
+        [
+            *pil_stage,
+            T.ToTensor(),
+            *tensor_stage,
+            T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+            *erasing_stage,
+        ]
+    )
+    return train_tf, _val_transform(image_size)

@@ -47,8 +47,10 @@ from dataset import (
 from losses import build_loss
 from model import SUPPORTED_BACKBONES, build_model
 from transforms import (
+    AUG_NAMES,
     IMAGENET_MEAN,
     IMAGENET_STD,
+    build_controlled_transforms,
     build_transforms as build_optuna_transforms,
 )
 
@@ -102,8 +104,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--storage", type=str, default="sqlite:///optuna_study.db",
                         help="Optuna storage (SQLite). 중단점 재개에 사용")
     parser.add_argument("--study_name", type=str, default="resnet50_ce_aug_search",
-                        help="Optuna study 식별 이름")
+                        help="Optuna study 식별 이름 (joint 탐색용)")
+
+    # 단독 튜닝 모드 (stage 1): 한 기법만 켜고 그 강도 파라미터만 Optuna 탐색
+    parser.add_argument("--search_aug", type=str, default=None,
+                        choices=list(AUG_NAMES),
+                        help="지정 시 해당 augmentation 1개만 단독 Optuna 튜닝 (study=singleaug_{aug})")
+
+    # 조합 실험 모드 (stage 2/3): 지정 기법들을 고정 파라미터로 켜고 1회 학습
+    parser.add_argument("--combo_augs", type=str, default=None,
+                        help="콤마구분 기법 목록(예: 'crop,rotate'). 지정 시 조합 학습 1회 실행. "
+                             "빈 문자열/'base' 면 무증강 baseline")
+    parser.add_argument("--aug_params_json", type=str, default=None,
+                        help="조합 학습 시 사용할 기법별 고정 파라미터 JSON "
+                             "(미지정 시 {output_dir}/optuna_best_per_aug.json)")
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# 단독 튜닝 search space (stage 1): 기법별로 강도 파라미터 하나만 탐색.
+#   각 기법은 항상 적용(prob=1.0)되며 여기서 정의한 파라미터만 변수.
+#   예외) sobel 은 강도가 없어 적용 확률 자체를 탐색.
+# ---------------------------------------------------------------------------
+def suggest_aug_params(trial: "optuna.trial.Trial", aug: str) -> dict:  # noqa: F821
+    if aug == "crop":
+        return {"crop_scale_min": trial.suggest_float("crop_scale_min", 0.5, 1.0)}
+    if aug == "rotate":
+        return {"rotate_deg": trial.suggest_float("rotate_deg", 0.0, 180.0)}
+    if aug == "colorjitter":
+        return {"colorjitter_strength": trial.suggest_float("colorjitter_strength", 0.05, 0.5)}
+    if aug == "blur":
+        return {"blur_sigma": trial.suggest_float("blur_sigma", 0.1, 3.0)}
+    if aug == "avgblur":
+        return {"avgblur_kernel": trial.suggest_int("avgblur_kernel", 3, 9, step=2)}
+    if aug == "sobel":
+        return {"sobel_prob": trial.suggest_float("sobel_prob", 0.05, 0.5)}
+    if aug == "noise":
+        return {"noise_std": trial.suggest_float("noise_std", 1e-3, 0.1, log=True)}
+    if aug == "cutout":
+        return {"cutout_scale": trial.suggest_float("cutout_scale", 0.05, 0.4)}
+    raise ValueError(f"알 수 없는 augmentation: {aug}")
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +667,150 @@ def run_optuna(args: argparse.Namespace, device: torch.device, output_dir: Path)
 
 
 # ---------------------------------------------------------------------------
+# 9b. 단독 튜닝 모드 (stage 1) — 한 기법만 Optuna 탐색
+# ---------------------------------------------------------------------------
+def run_single_aug_search(args: argparse.Namespace, device: torch.device, output_dir: Path) -> None:
+    import optuna
+    from optuna.pruners import MedianPruner
+    from optuna.samplers import TPESampler
+
+    aug = args.search_aug
+    study_name = f"singleaug_{aug}"  # 기법별 독립 study (resume 도 기법 단위)
+
+    print(f"[INFO] mode                  : single-aug tuning")
+    print(f"[INFO] target augmentation   : {aug}")
+    print(f"[INFO] backbone / loss        : {args.backbone} / {args.loss_type}")
+    print(f"[INFO] study_name            : {study_name}")
+    print(f"[INFO] storage               : {args.storage}")
+    print(f"[INFO] n_trials (target)     : {args.n_trials}")
+    print(f"[INFO] epochs / bs / lr      : {args.epochs} / {args.batch_size} / {args.lr}")
+
+    train_df, val_df, image_roots = prepare_data(args)
+
+    train_set = HAM10000Dataset(train_df, image_roots, transform=None)
+    counts = train_set.class_counts()
+    val_set = HAM10000Dataset(val_df, image_roots, transform=_only_val_transform())
+
+    pin_memory = device.type == "cuda"
+    train_loader = DataLoader(
+        train_set, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.num_workers, pin_memory=pin_memory, drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_set, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, pin_memory=pin_memory,
+    )
+
+    def objective(trial: "optuna.trial.Trial") -> float:
+        set_seed(args.seed)  # 매 trial 동일 초기화 → 강도만 변수
+        params = suggest_aug_params(trial, aug)
+        train_tf, _ = build_controlled_transforms([aug], params)
+        train_set.transform = train_tf
+
+        run_name = f"{args.backbone}_{args.loss_type}_singleaug_{aug}_trial_{trial.number}"
+        print("\n" + "=" * 60)
+        print(f"  [single-aug: {aug}] Trial {trial.number}  params={params}")
+        print("=" * 60)
+        return train_model(
+            args, train_loader, val_loader, counts, device, run_name, output_dir, trial=trial,
+        )
+
+    sampler = TPESampler(seed=args.seed)
+    pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=5)
+    study = optuna.create_study(
+        direction="maximize", study_name=study_name, storage=args.storage,
+        load_if_exists=True, sampler=sampler, pruner=pruner,
+    )
+
+    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    remaining = max(0, args.n_trials - len(completed))
+    print(f"[INFO] completed / remaining : {len(completed)} / {remaining}")
+    if remaining > 0:
+        study.optimize(objective, n_trials=remaining)
+
+    print("\n" + "#" * 60)
+    print(f"#  [single-aug: {aug}] 탐색 완료")
+    print("#" * 60)
+    print(f"[BEST] value (Macro F1)      : {study.best_value:.4f}")
+    print(f"[BEST] params                : {study.best_params}")
+
+    # 기법별 best 를 공용 JSON 에 누적 저장 (8개 모이면 조합 실험 입력이 됨).
+    combined_path = output_dir / "optuna_best_per_aug.json"
+    combined = {}
+    if combined_path.exists():
+        combined = json.loads(combined_path.read_text(encoding="utf-8"))
+    combined[aug] = {"best_value": float(study.best_value), "params": study.best_params}
+    combined_path.write_text(
+        json.dumps(combined, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    print(f"[DONE] per-aug best 갱신     : {combined_path}")
+
+
+# ---------------------------------------------------------------------------
+# 9c. 조합 실험 모드 (stage 2/3) — 고정 파라미터로 지정 기법 조합 1회 학습
+# ---------------------------------------------------------------------------
+def _load_aug_params(args: argparse.Namespace, output_dir: Path) -> dict:
+    """per-aug best JSON 을 읽어 {param: value} 평탄화 dict 로 반환."""
+    path = Path(args.aug_params_json) if args.aug_params_json else output_dir / "optuna_best_per_aug.json"
+    if not path.exists():
+        print(f"[WARN] 파라미터 JSON 이 없어 기본값으로 진행: {path}")
+        return {}
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    flat: dict = {}
+    for _aug, entry in raw.items():
+        params = entry.get("params", entry) if isinstance(entry, dict) else {}
+        if isinstance(params, dict):
+            flat.update(params)
+    return flat
+
+
+def run_combo(args: argparse.Namespace, device: torch.device, output_dir: Path) -> None:
+    raw = (args.combo_augs or "").strip().lower()
+    if raw in ("", "base", "none"):
+        active = []
+    else:
+        active = [a.strip() for a in raw.split(",") if a.strip()]
+    # 대칭성 보장: 정렬해 canonical run_name 생성 (crop_rotate == rotate_crop).
+    active_sorted = sorted(active, key=lambda a: AUG_NAMES.index(a) if a in AUG_NAMES else 999)
+    tag = "_".join(active_sorted) if active_sorted else "base"
+    run_name = args.run_name or f"combo_{tag}"
+
+    aug_params = _load_aug_params(args, output_dir)
+
+    print(f"[INFO] mode                  : combination run")
+    print(f"[INFO] run_name              : {run_name}")
+    print(f"[INFO] active augmentations  : {active_sorted if active_sorted else 'baseline (none)'}")
+    print(f"[INFO] backbone / loss        : {args.backbone} / {args.loss_type}")
+    print(f"[INFO] epochs / bs / lr      : {args.epochs} / {args.batch_size} / {args.lr}")
+
+    train_df, val_df, image_roots = prepare_data(args)
+
+    train_tf, val_tf = build_controlled_transforms(active_sorted, aug_params)
+    train_set = HAM10000Dataset(train_df, image_roots, transform=train_tf)
+    val_set = HAM10000Dataset(val_df, image_roots, transform=val_tf)
+    counts = train_set.class_counts()
+
+    pin_memory = device.type == "cuda"
+    train_loader = DataLoader(
+        train_set, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.num_workers, pin_memory=pin_memory, drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_set, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, pin_memory=pin_memory,
+    )
+
+    best_f1 = train_model(args, train_loader, val_loader, counts, device, run_name, output_dir)
+    print(f"[RESULT] {run_name}  Best Macro F1 = {best_f1:.4f}")
+
+
+def _only_val_transform():
+    """검증 transform 한 개만 필요할 때 (build_controlled_transforms 의 val 재사용)."""
+    _, val_tf = build_controlled_transforms([], {})
+    return val_tf
+
+
+# ---------------------------------------------------------------------------
 # 10. Main
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -639,9 +823,13 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] device                : {device}")
 
-    if args.optuna:
+    if args.search_aug:                 # stage 1: 단독 튜닝
+        run_single_aug_search(args, device, output_dir)
+    elif args.combo_augs is not None:   # stage 2/3: 조합 학습 1회
+        run_combo(args, device, output_dir)
+    elif args.optuna:                   # joint 탐색 (검증 baseline)
         run_optuna(args, device, output_dir)
-    else:
+    else:                               # 단일 학습 (기존 플래그 방식)
         run_single(args, device, output_dir)
 
 

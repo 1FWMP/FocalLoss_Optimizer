@@ -160,7 +160,12 @@ FocalLoss_Optimizer/
 ├── eval_accuracy.py   # 저장된 .pth 일괄 평가 (Accuracy / F1 / Precision / Recall)
 ├── analyze_results.py # summary.csv + 학습 곡선 시각화
 ├── run_experiments.sh # Step1(ResNet depth) → Step2(aug 8조합) 자동 실행
-├── run_optuna_search.sh # Optuna 증강 파라미터 탐색 (resnet50 고정, resume 지원)
+├── run_optuna_search.sh # joint Optuna 탐색 (8기법 동시, stage4 검증 baseline)
+├── run_single_aug_search.sh    # stage1: 8기법 단독 튜닝
+├── run_combination_experiments.sh # stage2: 조합 히트맵 + stage3 greedy
+├── run_greedy_forward.py       # stage3: greedy forward selection
+├── analyze_combinations.py     # 8x8 히트맵 + combination_summary.csv
+├── measure_epoch_time.sh       # epoch당 시간 측정 헬퍼
 ├── download_data.py   # Kaggle 미러에서 HAM10000 받기
 ├── environment.yml    # conda 환경
 ├── requirements.txt   # pip 의존성
@@ -202,3 +207,110 @@ FocalLoss_Optimizer/
   **Macro F1** 을 best 모델 선정 기준으로 사용한다.
 - **평가 스크립트** (`eval_accuracy.py`): 전체 Accuracy / Macro F1 / Macro Precision / Macro Recall
   + 클래스별(akiec~vasc) Accuracy / F1 / Precision / Recall 을 테이블 형태로 출력.
+
+## 7. Augmentation 실험 방법론 (단독 튜닝 → 조합 히트맵 → greedy)
+
+> 이 섹션은 "어떤 데이터 증강을, 어떤 세기로, 어떻게 조합해야 Macro F1 이 가장
+> 좋아지는가" 를 **체계적으로** 규명하기 위한 4단계 실험의 설계·논리·해석 방법을
+> 한곳에 정리한 것이다. 나중에 보고서를 쓰거나 결과를 다시 읽을 때 이 섹션만 보면
+> 전체 그림과 각 선택의 근거를 이해할 수 있도록 작성했다.
+
+### 7.0 핵심 아이디어 한 줄 요약
+
+각 증강 기법의 **고유 최적 세기**를 먼저 따로 찾고(stage 1), 그 값을 고정한 채
+**기법들을 짝지어 상호작용**을 본 뒤(stage 2, 8×8 히트맵), 좋은 조합에서 출발해
+**한 개씩 더해보며 누적**(stage 3, greedy)한다. 마지막으로 8개를 한꺼번에 최적화한
+**joint Optuna(stage 4)** 와 비교해 우리 구조적 결론이 black-box 전역 최적화와
+얼마나 부합하는지 검증한다.
+
+### 7.1 다루는 8가지 증강 기법
+
+| 이름(키) | 구현 | 단독 튜닝 파라미터 | 비고 |
+| --- | --- | --- | --- |
+| `crop` | `RandomResizedCrop(scale=(s,1.0))` | `crop_scale_min` ∈ [0.5, 1.0] | off 면 `Resize+CenterCrop` |
+| `rotate` | `RandomRotation(±deg)` | `rotate_deg` ∈ [0, 180] | |
+| `colorjitter` | `ColorJitter(b/c/s, hue=½·s)` | `colorjitter_strength` ∈ [0.05, 0.5] | |
+| `blur` | `GaussianBlur(k=5, sigma)` | `blur_sigma` ∈ [0.1, 3.0] | torchvision 내장 |
+| `avgblur` | **커스텀** 평균(박스) 블러 | `avgblur_kernel` ∈ {3,5,7,9} | depthwise conv2d |
+| `sobel` | **커스텀** Sobel 엣지맵 치환 | `sobel_prob` ∈ [0.05, 0.5] | 강도 개념이 없어 *확률* 이 파라미터 |
+| `noise` | **커스텀** Gaussian Noise | `noise_std` ∈ [1e-3, 0.1] (log) | |
+| `cutout` | `RandomErasing(scale=(0.02,c))` | `cutout_scale` ∈ [0.05, 0.4] | |
+
+커스텀 3종(`sobel/noise/avgblur`)은 `transforms.py` 에 구현되어 있고 입력이 PIL/Tensor
+어느 쪽이든 동작한다. 파이프라인 순서는 항상
+`PIL(Crop→Rotate→ColorJitter→GaussianBlur) → ToTensor → Tensor(AvgBlur→Sobel→Noise)
+→ Normalize → Cutout(RandomErasing)` 로 **고정**한다. 순서를 고정하므로 "A+B" 와 "B+A"
+는 동일한 파이프라인이 되어 조합이 **대칭**이 된다(히트맵 상삼각만 계산하면 됨).
+
+### 7.2 평가 지표 — 왜 Macro F1 인가
+
+HAM10000 은 `nv`(양성 모반) 가 전체의 ~67% 를 차지하는 **극심한 불균형** 데이터다.
+정확도(accuracy) 는 다수 클래스만 잘 맞혀도 높게 나와 소수 클래스(예: `df`, `vasc`)
+성능을 가린다. 따라서 **모든 클래스의 F1 을 동일 가중으로 평균한 Macro F1** 을
+모든 단계의 단일 비교 지표(= 셀 값, objective return, best 모델 기준) 로 사용한다.
+
+### 7.3 Stage 1 — 단독 튜닝 (`run_single_aug_search.sh`)
+
+- **목적**: 각 기법 *하나*의 고유 최적 세기를 찾는다.
+- **방법**: 기법을 하나만 켜고(나머지 7개 OFF), baseline = `Resize+CenterCrop` 위에
+  그 기법만 얹어 **항상 적용(prob=1.0)** 한 뒤 **세기 파라미터만** Optuna(TPE)+MedianPruner
+  로 탐색한다. 8개 기법 각각 독립 study(`singleaug_{aug}`)를 가진다.
+- **prob=1.0 으로 고정하는 이유**: "얼마나 자주(prob)" 와 "얼마나 세게(magnitude)" 가
+  섞이면, 탐색이 prob→0 (사실상 미사용) 으로 도망쳐 세기 효과를 못 본다. 매번 적용으로
+  고정해 *세기* 만 본다. (단 `sobel` 은 엣지맵으로 통째로 치환하는 파괴적 연산이라 매번
+  적용하면 학습이 망가지므로, 예외적으로 *적용 확률* 자체를 파라미터로 둔다.)
+  `prob=1.0` 이라도 `RandomRotation/ColorJitter` 등은 내부적으로 매번 랜덤값을 뽑으므로
+  augmentation 효과(다양성)는 그대로 유지된다.
+- **산출물**: `outputs/optuna_best_per_aug.json` — 기법별 best 파라미터가 누적 저장된다
+  (다음 단계의 입력). 중단되어도 재실행하면 완료된 기법/trial 은 건너뛴다(SQLite resume).
+
+### 7.4 Stage 2 — 조합 히트맵 (`run_combination_experiments.sh` → `analyze_combinations.py`)
+
+- **목적**: 기법 간 **상호작용**(시너지/상충) 을 본다.
+- **방법**: stage 1 의 기법별 best 파라미터를 **고정**한 채 아래를 각각 1회씩 학습한다.
+  - `baseline`(무증강) 1런, **단일 기법** 8런(대각선), **두 기법 조합** 28런(상삼각).
+  - 총 37런. 공정 비교를 위해 모두 **동일 epoch, pruning 없이** 끝까지 학습한다.
+- **baseline 정의**: `Resize+CenterCrop` 만(flip 도 제외한 순수 무증강). 그래서
+  - 대각선 셀 = "그 기법 1개 vs 무증강" 의 마진,
+  - 비대각 셀 = "두 기법 동시" 의 성능.
+- **결과물**: `outputs/plots/combination_heatmap.png` (8×8, 값 주석·대칭),
+  `outputs/combination_summary.csv` (조합별 Best Macro F1 + baseline 대비 Δ, 내림차순).
+- **해석법**: 대각선보다 그 행/열의 비대각이 더 높으면 **시너지**, 두 단일보다 조합이
+  낮으면 **상충**(과도한 정규화 등). baseline 대비 Δ 로 각 조합의 순수 기여를 읽는다.
+
+### 7.5 Stage 3 — Greedy forward selection (`run_greedy_forward.py`)
+
+- **목적**: 히트맵에서 가장 좋은 pair 를 시작점으로, 기법을 **누적**하면 더 좋아지는지.
+- **방법**: 최고 pair 에서 시작 → 남은 기법을 하나씩 추가해보고, **Macro F1 이
+  `--margin`(기본 0.005) 이상 개선될 때만** 채택 → 개선 없으면 중단.
+- **margin 을 두는 이유**: seed 변동폭 수준의 미세한 향상에 휩쓸려 불필요한 기법을
+  쌓는 것을 막는다(강한 기법을 여럿 쌓으면 과정규화로 오히려 하락 가능).
+- **산출물**: `outputs/greedy_path.json` (추가 경로와 단계별 F1).
+
+### 7.6 Stage 4 — Joint Optuna 검증 baseline (`run_optuna_search.sh`)
+
+- **목적**: 8개 파라미터를 **한 study 에서 동시에** TPE 로 최적화한 "전역 최적 정책" 과
+  stage 1~3 의 구조적 결과를 **맞비교** 한다.
+- **해석**: greedy ≈ joint 면 "해석 가능한 단계적 파이프라인이 black-box 최적화와
+  맞먹는다"는 강한 결론. joint > greedy 면 "단독최적→조합(greedy 근사)이 놓친 상호작용
+  이득" 을 정량화한 것 — 어느 쪽이든 버리는 결과가 아니라 **상호 보완적 발견**이다.
+  (단독최적을 합치는 것은 정의상 상호작용을 무시하는 근사이므로 차이는 *예상된 현상*.)
+
+### 7.7 실행 순서 요약
+
+```bash
+# (0) epoch당 시간 측정 → 총 소요시간 가늠
+bash measure_epoch_time.sh
+
+# (1) 단독 튜닝 → outputs/optuna_best_per_aug.json
+bash run_single_aug_search.sh
+
+# (2)+(3) 조합 히트맵 + greedy (RUN_GREEDY=1 기본)
+bash run_combination_experiments.sh
+
+# (4) joint 검증 baseline
+bash run_optuna_search.sh
+```
+
+데이터 경로/예산은 환경변수로 조절한다(예:
+`DATA_DIR=/path N_TRIALS=12 EPOCHS=15 bash run_single_aug_search.sh`).
