@@ -92,6 +92,30 @@ python main.py --data_dir ./data --backbone densenet121 --loss_type cb_focal \
     --epochs 30 --batch_size 32 --lr 1e-4
 ```
 
+### Optuna 증강 탐색 (resnet50 × CE 고정)
+
+8가지 증강 기법(Crop / Cutout / ColorJitter / Sobel / Noise / Blur / Rotate /
+Average Blur)의 **연속·이산 파라미터 공간**을 TPE 베이지안 최적화로 탐색한다.
+`MedianPruner` 로 부진한 trial 을 조기 종료하고, SQLite storage 로 중단점 재개를 지원한다.
+
+```bash
+# 권장: 쉘 스크립트 (trial 당 15 에폭 기본)
+bash run_optuna_search.sh
+DATA_DIR=/path/to/data N_TRIALS=50 EPOCHS=15 bash run_optuna_search.sh
+
+# 직접 호출
+python main.py --optuna --data_dir ./data --backbone resnet50 --loss_type ce \
+    --n_trials 30 --epochs 15 \
+    --storage sqlite:///optuna_study.db --study_name resnet50_ce_aug_search
+```
+
+> **Resume** — 학습이 도중에 끊겨도 같은 명령을 다시 실행하면 이미 완료된 trial 은
+> 자동으로 건너뛰고 남은 횟수만큼 이어서 탐색한다(`load_if_exists=True` +
+> `remaining = n_trials − 완료 trial 수`). 처음부터 다시 하려면 `optuna_study.db`
+> 를 삭제하거나 `--study_name` 을 바꾼다.
+>
+> 탐색 종료 후 best 파라미터는 `outputs/optuna_best_{study_name}.json` 에 저장된다.
+
 매 에포크마다 다음을 출력한다.
 - `train_loss`, `val_loss`
 - 클래스별 F1 + **Macro F1** (`sklearn.classification_report`)
@@ -104,7 +128,7 @@ Best Macro F1 갱신 시 `outputs/best_model_{run_name}.pth` 로 저장되며,
 | 인자 | 기본값 | 설명 |
 | --- | --- | --- |
 | `--data_dir` | (필수) | 메타데이터/이미지 루트 디렉토리 |
-| `--backbone` | `efficientnet_b3` | 사용할 backbone (아래 목록 참고) |
+| `--backbone` | `resnet50` | 사용할 backbone (아래 목록 참고) |
 | `--loss_type` | `ce` | `ce` 또는 `cb_focal` |
 | `--epochs` | 30 | 학습 에포크 수 |
 | `--batch_size` | 32 | 배치 사이즈 |
@@ -115,6 +139,10 @@ Best Macro F1 갱신 시 `outputs/best_model_{run_name}.pth` 로 저장되며,
 | `--use_cutmix` | False | CutMix augmentation 적용 (batch-level) |
 | `--use_elastic` | False | Elastic Transform 적용 |
 | `--use_colorjitter` | False | Color Jitter 적용 |
+| `--optuna` | False | Optuna 증강 파라미터 탐색 모드로 실행 |
+| `--n_trials` | 30 | Optuna 총 trial 횟수 (완료분 제외, 남은 만큼만 진행) |
+| `--storage` | `sqlite:///optuna_study.db` | Optuna storage (중단점 재개용) |
+| `--study_name` | `resnet50_ce_aug_search` | Optuna study 식별 이름 |
 | `--val_size` | 0.2 | 검증 비율 (lesion 단위 stratified split) |
 | `--seed` | 42 | 재현성 시드 |
 | `--num_workers` | 4 | DataLoader 워커 수 |
@@ -124,13 +152,15 @@ Best Macro F1 갱신 시 `outputs/best_model_{run_name}.pth` 로 저장되며,
 
 ```
 FocalLoss_Optimizer/
-├── main.py            # 학습/검증 엔트리포인트 (aug 플래그, run_name, CutMix 포함)
+├── main.py            # 학습/검증 엔트리포인트 (단일 학습 + --optuna 탐색 모드)
 ├── dataset.py         # HAM10000Dataset, 이미지 경로 탐색, 메타 로딩
+├── transforms.py      # 커스텀 증강(Sobel/Noise/AverageBlur) + build_transforms(aug_params)
 ├── losses.py          # CBFocalLoss + build_loss factory
 ├── model.py           # SUPPORTED_BACKBONES + build_model factory (timm)
 ├── eval_accuracy.py   # 저장된 .pth 일괄 평가 (Accuracy / F1 / Precision / Recall)
 ├── analyze_results.py # summary.csv + 학습 곡선 시각화
 ├── run_experiments.sh # Step1(ResNet depth) → Step2(aug 8조합) 자동 실행
+├── run_optuna_search.sh # Optuna 증강 파라미터 탐색 (resnet50 고정, resume 지원)
 ├── download_data.py   # Kaggle 미러에서 HAM10000 받기
 ├── environment.yml    # conda 환경
 ├── requirements.txt   # pip 의존성

@@ -9,6 +9,10 @@ outputs/
 *.ckpt
 *.onnx
 
+# Optuna storage (실험 상태 DB)
+*.db
+optuna_study.db
+
 # 학습 로그 / 실험 트래킹
 runs/
 wandb/

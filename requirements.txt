@@ -8,3 +8,4 @@ pillow
 tqdm
 matplotlib
 kagglehub>=0.3.0
+optuna>=3.5.0

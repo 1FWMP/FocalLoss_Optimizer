@@ -25,21 +25,25 @@
 | 2 | Loss 비교 (완료) | EfficientNet-B3 × CE vs CB-Focal, DenseNet-121 × CE vs CB-Focal |
 | 3 | ResNet depth 비교 | ResNet-101 vs ResNet-152 (baseline aug + CE) → 더 높은 F1 backbone 선택 |
 | 4 | Augmentation 비교 | 선택된 ResNet × CE × 2³=8 조합 (CutMix / Elastic / ColorJitter on/off) |
+| 5 | Augmentation 탐색 (Optuna) | resnet50 × CE 고정, 8가지 증강 기법의 연속/이산 파라미터 공간을 TPE 베이지안 최적화 + MedianPruner 로 탐색 |
 
 - Phase 1 결과: DenseNet-121이 Best Macro F1 0.7817로 최고 backbone 확인
 - Phase 3·4 는 `run_experiments.sh` 가 순서대로 자동 실행하며 Step 1→2 winner 선택도 자동화
-- (예정) Phase 5: 최고 aug 조합 고정 후 CB-Focal gamma 튜닝 (0.5 / 1.0 / 1.5 / 2.0 / 2.5 / 3.0)
+- Phase 5 는 `run_optuna_search.sh` 가 실행. SQLite storage 로 중단점 재개(resume) 지원 — 끊겨도 다시 실행하면 완료된 trial 건너뛰고 이어서 진행
 
 ## 2. 디렉토리 구조
 
 ```
 FocalLoss_Optimizer/
-├── main.py               # 학습/검증 엔트리포인트 (parse_args → train loop)
+├── main.py               # 학습/검증 엔트리포인트 (단일 학습 + --optuna 탐색 모드)
 ├── dataset.py            # HAM10000Dataset, discover_image_roots, load_metadata
+├── transforms.py         # 커스텀 증강(Sobel/GaussianNoise/AverageBlur) + build_transforms(aug_params)
 ├── losses.py             # CBFocalLoss + build_loss factory
 ├── model.py              # SUPPORTED_BACKBONES + build_model factory (timm)
 ├── download_data.py      # Kaggle 미러에서 HAM10000 받기
 ├── run_experiments.sh    # Step1(ResNet depth) → Step2(8 aug 조합) 자동 순차 실행
+├── run_optuna_search.sh  # Optuna 증강 파라미터 탐색 (resnet50 고정, resume 지원)
+├── measure_epoch_time.sh # resnet50 epoch당 시간 측정 헬퍼 (실험 총 소요시간 추정용)
 ├── analyze_results.py    # summary.csv + 시각화 이미지 생성 (run_name 기반)
 ├── environment.yml       # conda 환경 (파이썬만 conda, 나머지는 pip)
 ├── requirements.txt      # pip 의존성
@@ -69,6 +73,18 @@ python download_data.py --data_dir ./data
 bash run_experiments.sh
 # 데이터 경로가 다를 경우:
 DATA_DIR=/path/to/data bash run_experiments.sh
+
+# Optuna 증강 탐색 (resnet50 × CE 고정, 8 augmentation 파라미터 TPE 탐색)
+# SQLite storage 사용 → 중단되어도 재실행하면 남은 trial 만 이어서 진행
+bash run_optuna_search.sh
+DATA_DIR=/path/to/data N_TRIALS=50 EPOCHS=15 bash run_optuna_search.sh
+# 직접 호출:
+python main.py --optuna --data_dir ./data --backbone resnet50 --loss_type ce \
+    --n_trials 30 --epochs 15 --storage sqlite:///optuna_study.db \
+    --study_name resnet50_ce_aug_search
+
+# epoch당 시간 측정 (실험 총 소요시간 추정용, 두 번째 epoch 의 time= 값 확인)
+bash measure_epoch_time.sh
 
 # 개별 실행 예시
 # ResNet-101 baseline (Step 1)
@@ -114,6 +130,16 @@ python analyze_results.py --output_dir ./outputs
 - **run_name 규칙**: `--run_name` 미지정 시 `{backbone}_{loss_type}` 로 자동 생성. 모델·히스토리 파일명과 eval 출력 레이블 모두 이 값 사용. `run_experiments.sh` 의 aug 실험은 `{backbone}_ce_{aug_tag}` 형식 (예: `resnet101_ce_cm_el`).
 - **CutMix**: `main.py:cutmix_batch` 에서 구현. batch-level 적용이므로 transforms 가 아닌 train loop 내부에서 실행. loss = λ·L(a) + (1−λ)·L(b) 형태로 CE·CB-Focal 모두 호환.
 - **Elastic Transform**: torchvision `>=0.12` 의 `transforms.ElasticTransform(alpha=50.0, sigma=5.0)` 사용. PIL 단계에서 적용 (`ToTensor` 앞).
+- **두 가지 증강 경로 (혼동 주의)**:
+  - 단일 학습 모드는 `main.py:build_transforms(args)` — `--use_cutmix/--use_elastic/--use_colorjitter` 플래그 기반 (기존 방식, 그대로 유지).
+  - Optuna 탐색 모드는 `transforms.py:build_transforms(aug_params)` — trial 이 넘기는 파라미터 dict 로 동적 조립. main.py 에서는 `build_optuna_transforms` 별칭으로 import.
+- **커스텀 증강 3종** (`transforms.py`): `SobelFilter`(엣지 추출, 확률), `GaussianNoise`(std·확률), `AverageBlur`(홀수 커널·확률). 입력이 PIL/Tensor 모두여도 내부 변환 후 **입력과 동일 타입으로 반환**. 파이프라인 순서: PIL(Crop→Flip→Rotate→ColorJitter→GaussianBlur) → ToTensor → Tensor(AverageBlur→Sobel→Noise) → Normalize → Cutout(RandomErasing).
+- **Optuna 탐색 규칙** (`main.py:run_optuna`):
+  - 데이터셋/로더는 1회만 생성하고 trial 마다 `train_set.transform` 만 교체 (디스크 재스캔 회피). val transform 은 고정.
+  - 각 trial 시작 시 `set_seed(args.seed)` 로 모델 초기화·증강 RNG 를 동일하게 맞춰 **augmentation 만 변수**가 되도록 통제.
+  - 매 epoch `trial.report` + `MedianPruner(n_startup_trials=5, n_warmup_steps=5)` 로 부진 trial 조기 종료.
+  - **Resume**: `create_study(load_if_exists=True)` + `remaining = n_trials - (COMPLETE trial 수)` 로 남은 만큼만 실행. 처음부터 다시 하려면 `optuna_study.db` 삭제 또는 `--study_name` 변경.
+  - run_name 은 `{backbone}_{loss_type}_trial_{trial.number}`. trial 마다 best 모델/히스토리가 `outputs/` 에 쌓이므로(=resnet50 ckpt 다수) 디스크 사용량 주의.
 - **이미지 루트 탐색**: `dataset.py:discover_image_roots` 가 `images/`, `HAM10000_images_part_{1,2}/`, `ham10000_images/`, `data_dir` 자체를 모두 시도. 새 폴더 구조가 생기면 여기에 추가.
 - **PyTorch 설치**: `environment.yml`은 conda 채널의 거대한 `pytorch-cuda` 를 피하고 PyTorch 공식 pip wheel 을 사용. 한국 네트워크에서 끊김 문제 때문이니 conda 채널로 되돌리지 말 것.
 
