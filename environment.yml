@@ -29,4 +29,5 @@ dependencies:
       - pillow
       - tqdm
       - matplotlib
-      - kagglehub>=0.3.0
+      # 1.0.x 는 kagglesdk get_web_endpoint import 충돌로 깨짐 → 0.3.x 로 상한 고정
+      - kagglehub>=0.3.0,<1.0

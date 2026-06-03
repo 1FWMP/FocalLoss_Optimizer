@@ -317,6 +317,31 @@ bash run_optuna_search.sh            # (4) joint 검증 baseline
 
 ```bash
 DATA_DIR=/path/to/data EPOCHS=15 N_TRIALS=12 bash run_all_aug.sh
-DATA_DIR=/path/to/data nohup bash run_all_aug.sh > run_all_aug.log 2>&1 &
-tail -f run_all_aug.log
 ```
+
+### 7.8 nohup 으로 백그라운드 실행 (장시간 작업 권장)
+
+터미널/SSH 가 끊겨도 작업이 죽지 않도록 `nohup` + `&` 로 백그라운드 실행한다.
+
+```bash
+cd FocalLoss_Optimizer
+
+# 실행 — 환경변수는 nohup 앞에 prefix 로 한 번만 주면 하위 3개 스크립트에 모두 전달된다.
+DATA_DIR=/path/to/data EPOCHS=15 N_TRIALS=12 \
+    nohup bash run_all_aug.sh > run_all_aug.log 2>&1 &
+
+# 진행 상황 실시간 확인 (Ctrl+C 는 보기만 종료, 작업은 계속 돈다)
+tail -f run_all_aug.log
+
+# 돌고 있는지 확인 / PID 찾기
+jobs -l                       # 현재 셸에서 띄운 경우
+ps -ef | grep run_all_aug     # 재접속 후 등 다른 셸에서
+
+# 중단해야 할 때 (위에서 찾은 PID)
+kill <PID>
+```
+
+- `nohup` — 터미널 종료(HUP) 신호를 무시해 SSH 접속을 끊고 나가도 계속 돈다.
+- `> run_all_aug.log 2>&1` — stdout 과 stderr 를 **모두** 로그 파일로 보낸다(`2>&1` 이 있어야 에러도 같이 기록).
+- 끝의 `&` — 백그라운드로 띄운다.
+- 중간에 끊겨도 같은 명령을 다시 실행하면 history/SQLite 기반으로 완료분은 SKIP 하고 이어서 진행한다.

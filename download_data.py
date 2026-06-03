@@ -43,9 +43,24 @@ def _import_kagglehub():
     try:
         import kagglehub  # noqa: F401
         return kagglehub
-    except ImportError as e:
+    except ModuleNotFoundError as e:
+        # kagglehub 자체가 설치되지 않은 경우
+        if e.name == "kagglehub":
+            raise SystemExit(
+                "[ERROR] kagglehub 패키지가 필요합니다. `pip install kagglehub` 또는 environment.yml로 설치하세요."
+            ) from e
+        # kagglehub 의 하위 의존성이 빠진 경우 — 실제 누락 모듈명을 그대로 보여준다
         raise SystemExit(
-            "[ERROR] kagglehub 패키지가 필요합니다. `pip install kagglehub` 또는 environment.yml로 설치하세요."
+            f"[ERROR] kagglehub import 중 하위 모듈 '{e.name}' 를 찾지 못했습니다.\n"
+            f"        `pip install {e.name}` 로 설치하거나, 아래 명령으로 실제 에러를 확인하세요:\n"
+            f"        python -c \"import kagglehub\""
+        ) from e
+    except ImportError as e:
+        # 설치는 됐으나 import 단계에서 다른 ImportError 가 난 경우 (버전 충돌 등)
+        raise SystemExit(
+            f"[ERROR] kagglehub import 실패: {e}\n"
+            f"        아래 명령으로 전체 traceback 을 확인하세요:\n"
+            f"        python -c \"import kagglehub\""
         ) from e
 
 
