@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -101,8 +102,15 @@ def evaluate(ckpt_path: Path, device: torch.device) -> dict:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="저장된 best_model_*.pth 일괄 평가 (Accuracy / Macro F1 / Precision / Recall + 클래스별)"
+    )
+    parser.add_argument("--output_dir", type=str, default="./outputs",
+                        help="best_model_*.pth 가 있는 디렉토리 (기본 ./outputs)")
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    output_dir = Path("./outputs")
+    output_dir = Path(args.output_dir).expanduser().resolve()
     pth_files = sorted(output_dir.glob("best_model_*.pth"))
 
     if not pth_files:

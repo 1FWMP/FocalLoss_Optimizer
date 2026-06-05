@@ -26,10 +26,13 @@
 | 3 | ResNet depth 비교 | ResNet-101 vs ResNet-152 (baseline aug + CE) → 더 높은 F1 backbone 선택 |
 | 4 | Augmentation 비교 | 선택된 ResNet × CE × 2³=8 조합 (CutMix / Elastic / ColorJitter on/off) |
 | 5 | Augmentation 탐색 (Optuna) | resnet50 × CE 고정, 8가지 증강 기법의 연속/이산 파라미터 공간을 TPE 베이지안 최적화 + MedianPruner 로 탐색 |
+| 6 | 최종 실험 | resnet50 × {무증강, rotate+blur} × {CE, CB-Focal γ∈{0,1,2,5}} × 3 seed = 30런. 선택된 best 증강 재검증 + CE vs CB-Focal + gamma 민감도 |
 
 - Phase 1 결과: DenseNet-121이 Best Macro F1 0.7817로 최고 backbone 확인
 - Phase 3·4 는 `run_experiments.sh` 가 순서대로 자동 실행하며 Step 1→2 winner 선택도 자동화
 - Phase 5 는 `run_optuna_search.sh` 가 실행. SQLite storage 로 중단점 재개(resume) 지원 — 끊겨도 다시 실행하면 완료된 trial 건너뛰고 이어서 진행
+- Phase 5 결과: best 증강 = **rotate+blur** (Macro F1 0.6881, 무증강 대비 +0.095). 상세 수치는 README 7.9
+- Phase 6 은 `run_final_experiment.sh` 가 실행(결과는 별도 `outputs_final/`). alpha(=beta)는 0.999 고정하고 gamma 만 스윕. 상세 설계는 README 7.10
 
 ## 2. 디렉토리 구조
 
@@ -48,6 +51,8 @@ FocalLoss_Optimizer/
 ├── run_greedy_forward.py      # stage3: 최고 pair부터 greedy forward selection
 ├── run_all_aug.sh             # stage1→2(+3)→4 일괄 실행 래퍼
 ├── analyze_combinations.py    # 조합 결과 → 8x8 히트맵 + combination_summary.csv
+├── run_final_experiment.sh    # Phase 6: 증강 ablation × loss × gamma (30런 → outputs_final/)
+├── analyze_final_experiment.py # Phase 6 집계: 시드/gamma mean±std, gamma 곡선, 페어드 대조, 소수클래스 F1
 ├── measure_epoch_time.sh # resnet50 epoch당 시간 측정 헬퍼 (실험 총 소요시간 추정용)
 ├── analyze_results.py    # summary.csv + 시각화 이미지 생성 (run_name 기반)
 ├── environment.yml       # conda 환경 (파이썬만 conda, 나머지는 pip)
@@ -103,6 +108,13 @@ bash run_optuna_search.sh            # stage4 joint 검증 baseline
 python main.py --search_aug noise --data_dir ./data --backbone resnet50 --loss_type ce
 python main.py --combo_augs "crop,rotate" --aug_params_json ./outputs/optuna_best_per_aug.json \
     --data_dir ./data --backbone resnet50 --loss_type ce --epochs 15
+
+# Phase 6 최종 실험 (자세한 설계는 README "7.10"): 30런 → outputs_final/, SKIP 재개
+DATA_DIR=/path/to/data bash run_final_experiment.sh
+#   환경변수로 범위 조절: SEEDS="42 43 44" GAMMAS="0 1 2 5" EPOCHS=30
+#   백그라운드:  DATA_DIR=/path nohup bash run_final_experiment.sh > run_final.log 2>&1 &
+python analyze_final_experiment.py --output_dir ./outputs_final   # 집계(+--no_per_class)
+python eval_accuracy.py --output_dir ./outputs_final              # per-checkpoint 상세표
 
 # 개별 실행 예시
 # ResNet-101 baseline (Step 1)

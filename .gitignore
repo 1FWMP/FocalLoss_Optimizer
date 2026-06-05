@@ -2,6 +2,7 @@
 data/
 test/
 outputs/
+outputs_final/
 
 # 학습된 모델 가중치 / 체크포인트 (어디에 저장되든)
 *.pth
