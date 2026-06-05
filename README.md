@@ -345,3 +345,88 @@ kill <PID>
 - `> run_all_aug.log 2>&1` — stdout 과 stderr 를 **모두** 로그 파일로 보낸다(`2>&1` 이 있어야 에러도 같이 기록).
 - 끝의 `&` — 백그라운드로 띄운다.
 - 중간에 끊겨도 같은 명령을 다시 실행하면 history/SQLite 기반으로 완료분은 SKIP 하고 이어서 진행한다.
+
+### 7.9 실험 결과 — 최종 증강 조합 선정 (resnet50 × CE × 15 epoch)
+
+> `outputs/` 는 `.gitignore` 대상이라 결과 파일이 저장소에 남지 않으므로, 4단계
+> 실험의 **실측 수치와 그로부터 도출한 최종 결론**을 여기에 박제해 둔다.
+> (재현하려면 `bash run_all_aug.sh` 후 `outputs/combination_summary.csv`,
+> `outputs/greedy_path.json`, `outputs/optuna_best_*.json` 을 다시 확인하면 된다.)
+
+#### 결론 한 줄
+
+**최종 증강 = `rotate + blur` (회전 + 가우시안 블러)**
+`rotate_deg ≈ 108.2°`, `blur_sigma ≈ 0.268` (GaussianBlur k=5),
+**Macro F1 = 0.6881** — 무증강 baseline 0.5929 대비 **+0.0953 (약 +16%)** 로 전체 37런 중 1위.
+
+```bash
+# 최종 학습 명령 (강도는 optuna_best_per_aug.json 에서 자동 로드)
+python main.py --combo_augs "rotate,blur" \
+    --aug_params_json ./outputs/optuna_best_per_aug.json \
+    --data_dir ./data --backbone resnet50 --loss_type ce \
+    --epochs 30 --batch_size 32 --lr 1e-4
+```
+
+#### 선정 근거 — 4단계 교차검증
+
+모든 비교 지표는 **Macro F1**. 기준점은 `history_combo_base.json` = **무증강 0.5929**.
+
+**① Stage 1 단독 기법 순위** (`optuna_best_per_aug.json`)
+
+| 기법 | 단독 Macro F1 | Δ vs baseline | 판정 |
+|---|---|---|---|
+| **rotate** | 0.6704 | **+0.078** | 압도적 1위 |
+| cutout | 0.6443 | +0.051 | 유효 |
+| sobel | 0.6351 | +0.042 | 유효 |
+| crop | 0.6097 | +0.017 | 약하게 유효 |
+| noise | 0.6072 | +0.014 | 약하게 유효 |
+| blur | 0.5929 | +0.000 | 단독으론 무의미 (=baseline) |
+| colorjitter | 0.5908 | −0.002 | 무해하나 무익 |
+| avgblur | 0.4741 | **−0.119** | **유해 (치명적)** → 제외 |
+
+**② Stage 2 조합 히트맵** (`combination_summary.csv`) — 상위가 전부 rotate 포함
+
+| 순위 | 조합 | Macro F1 | Δ |
+|---|---|---|---|
+| **1** | **rotate+blur** | **0.6881** | **+0.095** |
+| 2 | crop+rotate | 0.6801 | +0.087 |
+| 3 | rotate (단독) | 0.6704 | +0.078 |
+| 4 | rotate+noise | 0.6653 | +0.072 |
+
+- **blur 시너지**: blur 는 단독이면 baseline 과 동일(Δ0)인데 rotate 와 합치면 rotate
+  단독(0.6704)보다 **+0.0177** 더 오른다. 혼자선 무익하지만 rotate 의 기하학적
+  다양성 위에서 **약한 정규화**로 작동하는 전형적 상호작용 → 히트맵 rotate 행의
+  blur 셀이 대각선보다 밝은 것이 증거.
+
+**③ Stage 3 greedy** (`greedy_path.json`) — rotate+blur 에서 시작, margin 0.005 개선
+없어 즉시 중단. 3중 조합은 무엇을 더해도 전부 하락:
+
+```
+rotate+blur (기준)        0.68813
+  + crop   → 0.67978  (−0.008)   + colorjitter → 0.64924  (−0.039)
+  + noise  → 0.63749  (−0.051)   + sobel       → 0.63517  (−0.053)
+  + cutout → 0.61220  (−0.076)   + avgblur     → 0.57690  (−0.111)
+```
+→ 강한 증강을 더 쌓으면 과정규화로 손해. **2개에서 멈추는 것이 최적.**
+
+**④ Stage 4 joint Optuna 검증** (`optuna_best_resnet50_ce_aug_search.json`)
+joint best = **0.6108** 로 greedy(0.6881)보다 낮다. 단 `n_completed=12` —
+**12차원 공간을 12 trial 로** 탐색해 TPE 가 수렴 못 했고, best_params 가
+`avgblur_prob=0.94`(가장 유해한 기법을 켬)·`blur_sigma≈1.0`(과한 블러) 등 나쁜
+영역에 갇혔다. 즉 구조적 결론이 틀린 게 아니라 **joint 의 예산 부족**(README 7.6 의
+"greedy > joint" 케이스)일 뿐 — 오히려 단계적 탐색이 더 적은 예산으로 더 나은 해를
+찾았다는 근거.
+
+#### 종합 논리
+
+1. **단독 최강(rotate) + 검증된 시너지(blur)** — 4개 분석 모두 rotate 를 최상위로 지목.
+2. rotate+blur 는 **전체 37런의 전역 최댓값**이자 greedy 종착점 (두 방법이 독립적으로 일치).
+3. **3중 조합 전부 하락** → "2개가 최적" 을 데이터로 확정.
+4. 유해 기법(avgblur −0.12, colorjitter −0.002)은 명확히 배제.
+
+#### ⚠️ 한계 (보고서에 명시)
+
+본 탐색은 **resnet50 × CE × 15 epoch** 조건이다. 최종 backbone 이 Phase 1 우승자
+**DenseNet-121** 이라면 증강의 *상대 순위* 는 대체로 전이되나 절댓값은 달라질 수 있다.
+여유가 되면 최종 backbone 에서 `rotate+blur` vs `rotate 단독` vs `무증강` 만 30 epoch
+로 재확인하면 결론이 완결된다.
