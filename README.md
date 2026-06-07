@@ -494,3 +494,82 @@ python analyze_final_experiment.py --output_dir ./outputs_final
    seed std 이내)이면 단순한 **CE 기본** + 소수 클래스 F1 로 근거 보강.
 
 > 결과 수치가 나오면 이 절에 7.9 처럼 표로 박제할 것(`outputs_final/` 는 gitignore 대상).
+
+#### 실험 결과 (실측, resnet50 × 30 epoch)
+
+> 30런 중 **26런은 정상(30 epoch) 완료**. 단 **seed 42 의 4개 조건이 1 epoch 만 돌고
+> 중단**되어, `analyze_final_experiment.py` 가 생성한 `final_summary.csv` /
+> `final_contrasts.csv` 의 해당 행이 오염돼 있다. 아래 표는 **깨진 런을 제외하고
+> 다시 집계한 값**이며, 원본 CSV 를 그대로 인용하면 안 된다.
+
+##### ⚠️ 데이터 정합성 — 깨진 4개 런
+
+`history.args.epochs == 1`, history 길이 1 인 미완료 런(전부 seed 42):
+
+| 조건 | seed 42 | seed 43 | seed 44 |
+|---|---|---|---|
+| `ce` × `noaug` | **1 ep · 0.164** | 30 ep · 0.642 | 30 ep · 0.713 |
+| `ce` × `rotblur` | **1 ep · 0.170** | 30 ep · 0.739 | 30 ep · 0.714 |
+| `cbf γ=2` × `noaug` | **1 ep · 0.197** | 30 ep · 0.671 | 30 ep · 0.690 |
+| `cbf γ=2` × `rotblur` | **1 ep · 0.221** | 30 ep · 0.705 | 30 ep · 0.712 |
+
+이 4개 조건만 `final_summary.csv` 에서 std ≈ 0.28~0.32 로 튄다 — **학습 붕괴가 아니라
+1-epoch 모델이 평균에 섞인 집계 오염**이다. 재실행하려면 해당 4개
+`history_*.json`(+`best_model_*.pth`)을 지우고 `run_final_experiment.sh` 를 다시
+돌리면 SKIP 로직이 나머지는 건너뛰고 이 4개만 30 epoch 으로 채운다.
+
+##### 헤드라인 — Best Macro F1 (깨진 런 제외, mean ± std)
+
+| 증강 | loss 설정 | Macro F1 | n(seed) |
+|---|---|---|---|
+| `rotblur` | **CE** | **0.7263 ± 0.0175** | 2* |
+| `rotblur` | CBF γ=1 | 0.7127 ± 0.0091 | 3 |
+| `rotblur` | CBF γ=5 | 0.7097 ± 0.0090 | 3 |
+| `rotblur` | CBF γ=0 | 0.7096 ± 0.0055 | 3 |
+| `rotblur` | CBF γ=2 | 0.7088 ± 0.0048 | 2* |
+| `noaug` | CBF γ=0 | 0.7051 ± 0.0089 | 3 |
+| `noaug` | CBF γ=2 | 0.6805 ± 0.0140 | 2* |
+| `noaug` | CBF γ=1 | 0.6807 ± 0.0113 | 3 |
+| `noaug` | **CE** | 0.6775 ± 0.0503 | 2* |
+| `noaug` | CBF γ=5 | 0.6722 ± 0.0257 | 3 |
+
+`*` = seed 42 누락으로 2 seed 집계. **시드 평균 최고 = `rotblur` × CE = 0.7263**
+(단 2 seed 라 seed 42 재실행 전까지는 잠정).
+
+##### 가설 판정
+
+- **H1 (증강 전이) — ✅ 성립.** 같은 loss·seed 에서 `rotblur − noaug` Δ 가 모든
+  loss 설정에서 양수. paired t-test 로 유의: CBF γ=1 Δ=+0.0321 (p=0.049),
+  γ=2 Δ=+0.0283 (p=0.021). 30 epoch 에서도 7.9 의 증강 이득이 유지된다
+  (단 +0.03~0.05 수준으로, 15 epoch 의 +0.095 보다는 작다 — 예산이 늘면 무증강도
+  따라잡아 격차가 줄어드는 전형적 패턴).
+- **H2 (loss: CB-Focal vs CE) — ❌ 이득 없음.** 깨진 런을 빼면 같은 증강에서
+  CE 와 CB-Focal(최적 γ) 차이가 seed std 이내다. `rotblur` 에서는 오히려 CE 가
+  best-γ CBF(γ=1) 보다 +0.019 높고(2 seed), `noaug` 에서도 CBF γ=0 우세폭이
+  +0.024 ± 0.041 로 비유의. **이 데이터에서는 CB-Focal 이 CE 를 이긴다는 증거가
+  없다.** (원본 `final_contrasts.csv` 의 Δ≈0.17~0.20 은 1-epoch CE 와 비교한 허수.)
+- **H3 (gamma 민감도) — 평탄, 과하면 하락.** `rotblur` 에서 γ∈{0,1,2,5} 가
+  0.709~0.713 으로 사실상 무차별 → focusing 의 추가 이득 없음. `noaug` 에서는
+  γ↑ 시 하락(γ=0: 0.705 → γ=5: 0.672)해 **focusing 이 오히려 해로움**.
+
+##### 소수 클래스 (akiec / df / vasc) — `final_per_class_f1.csv`, 정상 런 한정
+
+CB-Focal 의 존재 이유인 소수 클래스 F1 도 γ 로 끌어올리지 못한다. 소수 3클래스 평균 F1:
+
+| 증강 | γ=0 | γ=1 | γ=5 |
+|---|---|---|---|
+| `rotblur` | 0.665 | 0.674 | 0.682 |
+| `noaug` | 0.677 | 0.645 | 0.633 |
+
+`rotblur` 에서 γ 증가에 따라 미미하게(+0.017) 오르지만 `noaug` 에서는 반대로 내려가
+방향이 일관되지 않다. 다수 클래스 `nv` 는 전 조건 0.92 로 포화. **focusing 의
+소수클래스 구제 효과는 관측되지 않음** → H2 결론 보강.
+
+#### 최종 결론
+
+1. **증강(rotate+blur)은 30 epoch 에서도 유효**(H1, 통계 유의) — 채택.
+2. **CB-Focal 은 CE 대비 이득 없음**(H2·H3·소수클래스 모두 음성) → 최종 모델은
+   **CE 기본** 으로 가고, CB-Focal 은 "시도했으나 이 데이터·backbone 에선 개선 없음"
+   으로 보고하는 것이 타당.
+3. **단, `rotblur × CE` 가 1위라는 결론은 seed 42(ce·γ=2 4런) 재실행 후 확정**할 것.
+   현재 CE 조건은 2 seed 뿐이라 1위 마진(+0.014)이 표본 부족에 취약하다.
